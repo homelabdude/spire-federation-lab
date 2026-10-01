@@ -1,0 +1,26 @@
+{{- if .Values.gateway.renderListener }}
+{{- /*
+Rendered only by `make cluster-listener` (renderListener=true, --show-only). The Makefile
+takes the listener from this object and adds or replaces it on the live Gateway with a
+JSON patch, so the Gateway's other listeners are never touched. The Gateway belongs to
+the cluster-build repo, so it's never part of this release.
+*/}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ .Values.gateway.namespace }}
+spec:
+  gatewayClassName: {{ .Values.gateway.name }}
+  listeners:
+    - name: {{ .Values.gateway.listenerName }}
+      hostname: {{ .Values.oidcHost | quote }}
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.spire.namespaces.server.name | default "spire-server" }}
+{{- end }}

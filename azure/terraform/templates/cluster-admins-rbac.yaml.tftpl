@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: entra-cluster-admins
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: "entra:role:${role_value}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin

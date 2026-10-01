@@ -1,0 +1,118 @@
+# Defaults for the spire-lab chart. Environment-specific values (trust domain,
+# issuer hostname, IPs, federation peer) go in cluster/values.local.yaml, which is
+# gitignored. See cluster/values.local.example.yaml.
+
+# Public hostname of the OIDC discovery provider (the JWT issuer is https://<oidcHost>).
+# Used by the Gateway listener. The chart checks that the spire.* issuer settings match it.
+oidcHost: ""
+
+# --- Upstream spiffe/spire ---------------------------------------------------
+
+global:
+  spire:
+    # Set in values.local.yaml: trustDomain, clusterName, jwtIssuer (https://<oidcHost>)
+    trustDomain: ""
+    clusterName: ""
+    jwtIssuer: ""
+    # Enables PSS-labelled namespaces (spire-server / spire-system), priority
+    # classes, restricted security contexts, prometheus endpoints, and strict
+    # mode, which refuses to render while example.org defaults are still set.
+    recommendations:
+      enabled: true
+    namespaces:
+      create: true
+    caSubject:
+      country: ZZ
+      organization: spire-federation-lab
+      commonName: spire-federation-lab
+    persistence:
+      storageClass: longhorn
+
+spire:
+  spire-server:
+    # jwt_key_type falls back to ca_key_type, and the chart has no separate
+    # jwtKeyType, so this also makes JWT-SVIDs RS256. Entra ID only accepts
+    # RSA-signed assertions from external issuers.
+    caKeyType: rsa-2048
+    caTTL: 24h
+    defaultX509SvidTTL: 1h
+    # Only used as a client assertion for Entra token exchange, so keep it short.
+    defaultJwtSvidTTL: 15m
+
+    # Serves the https_spiffe bundle endpoint on :8443. It's exposed on the LAN by
+    # this chart's bundle-endpoint Service, so the server API on :8081 stays ClusterIP.
+    federation:
+      enabled: true
+      bundleEndpoint:
+        refreshHint: 5m
+
+    controllerManager:
+      # Must match federation.className below. The controller ignores
+      # ClusterSPIFFEIDs / ClusterFederatedTrustDomains with any other class.
+      className: spire-lab
+
+  spire-agent:
+    workloadAttestors:
+      k8s:
+        verification:
+          # kubeadm kubelets have a self-signed serving cert in /var/lib/kubelet/pki.
+          # auto tries that first and then falls back to the API server CA.
+          # The chart default is skip.
+          type: auto
+
+  spiffe-oidc-discovery-provider:
+    # TLS is terminated by the public reverse proxy in front of Envoy Gateway :80,
+    # so serve plain HTTP and let the chart render an HTTPRoute on the existing Gateway.
+    tls:
+      spire:
+        enabled: false
+    config:
+      # Set in values.local.yaml to https://<oidcHost>/keys. Behind a
+      # TLS-terminating proxy the provider would otherwise advertise http://.
+      jwksUri: ""
+      setKeyUse: true
+    gatewayAPI:
+      enabled: true
+      # Set in values.local.yaml to <oidcHost>.
+      host: ""
+      listenerSet:
+        enabled: false
+      # The chart uses parentRefs verbatim, so sectionName goes here. spire-oidc is
+      # the listener rendered from templates/gateway-listener.yaml.
+      parentRefs:
+        - name: eg
+          namespace: envoy-gateway-system
+          sectionName: spire-oidc
+
+# --- This chart ----------------------------------------------------------------
+
+gateway:
+  name: eg
+  namespace: envoy-gateway-system
+  listenerName: spire-oidc
+  # Only used by `make cluster-listener` to render the listener, which it then adds
+  # to the live Gateway with a JSON patch. The Gateway belongs to another repo, so
+  # it's never part of this release.
+  renderListener: false
+
+bundleEndpoint:
+  # MetalLB IP for the SPIFFE bundle endpoint (https_spiffe, TCP 8443).
+  loadBalancerIP: ""
+
+# Federation with trust domain B (the VM). Enable once its SPIRE server is running.
+federation:
+  enabled: false
+  name: vm
+  className: spire-lab
+  trustDomain: ""
+  bundleEndpointURL: ""
+  # Defaults to spiffe://<trustDomain>/spire/server
+  endpointSPIFFEID: ""
+  # Bootstrap bundle for the https_spiffe endpoint (spire-server bundle show -format spiffe
+  # on the VM). The Makefile passes it with --set-file from out/vm.bundle.json.
+  trustDomainBundle: ""
+  # Pods matching this also get trust domain B's bundle. Others only trust their own
+  # domain, via the upstream chart's fallback ClusterSPIFFEID.
+  podSelector:
+    matchLabels:
+      spire-lab/federates-with: vm

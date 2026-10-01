@@ -1,0 +1,35 @@
+# Copy to cluster/values.local.yaml (gitignored) and fill in.
+# The chart fails to render if the issuer settings don't match oidcHost.
+
+# Public hostname for the OIDC discovery provider. Entra ID fetches
+# https://<this>/.well-known/openid-configuration, so it must be reachable from the
+# internet over HTTPS with a publicly trusted certificate, terminated by the reverse
+# proxy in front of Envoy Gateway. A wildcard certificate covers one label only:
+# *.example.com covers spire-k8s.example.com, not spire.k8s.example.com.
+oidcHost: spire-k8s.example.com
+
+global:
+  spire:
+    trustDomain: k8s.spire-lab.internal
+    # k8s_psat cluster name, ends up in agent SPIFFE IDs
+    clusterName: homelab
+    # Must match the FIC issuer exactly
+    jwtIssuer: https://spire-k8s.example.com
+
+spire:
+  spiffe-oidc-discovery-provider:
+    config:
+      jwksUri: https://spire-k8s.example.com/keys
+    gatewayAPI:
+      host: spire-k8s.example.com
+
+bundleEndpoint:
+  # Inside the MetalLB pool and not already taken (.240 is the Envoy Gateway)
+  loadBalancerIP: 192.168.0.241
+
+# Trust domain B (the VM). Enable once its SPIRE server is running and its bundle
+# is in out/vm.bundle.json.
+federation:
+  enabled: false
+  trustDomain: vm.spire-lab.internal
+  bundleEndpointURL: https://192.168.0.220:8443

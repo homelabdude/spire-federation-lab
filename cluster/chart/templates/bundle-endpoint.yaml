@@ -1,0 +1,25 @@
+{{- include "spire-lab.validate" . }}
+{{- if not .Values.gateway.renderListener }}
+# Exposes only the SPIFFE bundle endpoint (https_spiffe) on a pinned MetalLB IP so
+# trust domain B can fetch this domain's bundle. The server API (:8081) stays ClusterIP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server-bundle-endpoint
+  namespace: {{ .Values.global.spire.namespaces.server.name | default "spire-server" }}
+  annotations:
+    metallb.io/loadBalancerIPs: {{ .Values.bundleEndpoint.loadBalancerIP | quote }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: server
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: federation
+      port: 8443
+      targetPort: federation
+      protocol: TCP
+{{- end }}

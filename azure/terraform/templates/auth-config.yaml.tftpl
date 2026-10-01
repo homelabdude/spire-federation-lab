@@ -1,0 +1,19 @@
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+  - issuer:
+      url: ${issuer_url}
+      audiences:
+        - ${client_id}
+    claimValidationRules:
+      - expression: "claims.tid == '${tenant_id}'"
+        message: token is not from the expected tenant
+    claimMappings:
+      username:
+        # oid is immutable. upn and preferred_username can be changed or reassigned.
+        claim: oid
+        prefix: "entra:"
+      groups:
+        # Entra app roles (e.g. Cluster.Admin) -> entra:role:Cluster.Admin
+        claim: roles
+        prefix: "entra:role:"

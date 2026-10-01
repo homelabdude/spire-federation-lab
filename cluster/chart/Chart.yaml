@@ -1,0 +1,13 @@
+apiVersion: v2
+name: spire-lab
+description: SPIRE trust domain A for spire-federation-lab. Wraps spiffe/spire (helm-charts-hardened) and adds the bundle endpoint Service and federation resources.
+type: application
+version: 0.1.0
+
+# spire-crds is installed as a separate release (see the Makefile). Its CRDs are
+# templates rather than crds/, so custom resources in the same release would fail
+# on first install.
+dependencies:
+  - name: spire
+    version: 0.30.2
+    repository: https://spiffe.github.io/helm-charts-hardened/

@@ -1,0 +1,120 @@
+# Interactive SPIRE -> Entra ID -> kube-apiserver shell. Started with `./run.sh shell`.
+#
+# Runs as spire-demo/azure-client, so it gets the SPIFFE ID the federated credential trusts.
+# spiffe-helper keeps a fresh JWT-SVID in /svid/jwt.token. The pod has no service account
+# token, so kube-apiserver only sees the Entra token. Commands (on PATH):
+#   svid          print the current JWT-SVID claims
+#   kube-token    exchange the SVID for an Entra access token for homelab-kube-apiserver
+#   ekubectl ...  kubectl against the in-cluster API server with that token
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fic-shell
+  namespace: ${NS}
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/svid"
+    daemon_mode = true
+    svid_file_name = "svid.pem"
+    svid_key_file_name = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    jwt_svids = [{ jwt_audience = "api://AzureADTokenExchange", jwt_svid_file_name = "jwt.token" }]
+  svid: |
+    #!/bin/sh
+    cut -d. -f2 /svid/jwt.token | tr '_-' '/+' | awk '{n=length($0)%4; if(n) $0=$0 substr("===",1,4-n); print}' | base64 -d; echo
+  kube-token: |
+    #!/bin/sh
+    # client credentials grant with the SPIRE JWT-SVID as the federated client assertion
+    curl -sS -X POST "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+      -d grant_type=client_credentials \
+      -d client_id="$CLIENT_ID" \
+      --data-urlencode scope="$KUBE_APP_ID/.default" \
+      --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+      -d client_assertion="$(cat /svid/jwt.token)" \
+      | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
+  ekubectl: |
+    #!/bin/sh
+    exec /tools/kubectl --server=https://kubernetes.default.svc \
+      --certificate-authority=/kube-ca/ca.crt --token="$(kube-token)" "$@"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fic-shell
+  namespace: ${NS}
+spec:
+  serviceAccountName: azure-client
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    # Native sidecar (restartPolicy: Always): keeps refreshing the SVID for the pod's lifetime.
+    - name: spiffe-helper
+      image: ghcr.io/spiffe/spiffe-helper:0.11.0
+      restartPolicy: Always
+      args: ["-config", "/etc/spiffe-helper/helper.conf"]
+      securityContext: &restricted
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - { name: spiffe, mountPath: /spiffe-workload-api, readOnly: true }
+        - { name: conf, mountPath: /etc/spiffe-helper/helper.conf, subPath: helper.conf, readOnly: true }
+        - { name: svid, mountPath: /svid }
+    - name: fetch-kubectl
+      image: curlimages/curl:8.16.0
+      securityContext: *restricted
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          base=https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64
+          curl -sSfLo /tools/kubectl "$base/kubectl"
+          echo "$(curl -sSfL "$base/kubectl.sha256")  /tools/kubectl" | sha256sum -c -
+          chmod 0755 /tools/kubectl
+      volumeMounts:
+        - { name: tools, mountPath: /tools }
+  containers:
+    - name: shell
+      image: curlimages/curl:8.16.0
+      securityContext: *restricted
+      command: ["sleep", "infinity"]
+      env:
+        - { name: TENANT_ID, value: "${TENANT_ID}" }
+        - { name: CLIENT_ID, value: "${CLIENT_ID}" }
+        - { name: KUBE_APP_ID, value: "${KUBE_APP_ID}" }
+        - { name: PATH, value: "/opt/fic:/tools:/usr/local/bin:/usr/bin:/bin" }
+        - { name: HOME, value: "/tmp" }
+      volumeMounts:
+        - { name: svid, mountPath: /svid, readOnly: true }
+        - { name: tools, mountPath: /tools, readOnly: true }
+        - { name: scripts, mountPath: /opt/fic, readOnly: true }
+        - { name: kube-ca, mountPath: /kube-ca, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: spiffe
+      csi: { driver: csi.spiffe.io, readOnly: true }
+    - name: conf
+      configMap: { name: fic-shell }
+    - name: scripts
+      configMap:
+        name: fic-shell
+        defaultMode: 0555
+        items:
+          - { key: svid, path: svid }
+          - { key: kube-token, path: kube-token }
+          - { key: ekubectl, path: ekubectl }
+    - name: svid
+      emptyDir: { medium: Memory }
+    - name: tools
+      emptyDir: {}
+    - name: tmp
+      emptyDir: { medium: Memory }
+    - name: kube-ca
+      configMap: { name: kube-root-ca.crt }

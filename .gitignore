@@ -1,0 +1,16 @@
+.DS_Store
+lab.env
+out/
+cluster/values.local.yaml
+cluster/chart/charts/
+
+# Rendered from terraform output (tenant and client IDs): write these to out/
+auth-config.yaml
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+tfplan
+!*.tfvars.example

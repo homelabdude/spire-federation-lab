@@ -1,0 +1,36 @@
+{{- if and .Values.federation.enabled (not .Values.gateway.renderListener) }}
+{{- $f := .Values.federation }}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterFederatedTrustDomain
+metadata:
+  name: {{ $f.name }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+spec:
+  className: {{ $f.className }}
+  trustDomain: {{ $f.trustDomain }}
+  bundleEndpointURL: {{ $f.bundleEndpointURL | quote }}
+  bundleEndpointProfile:
+    type: https_spiffe
+    endpointSPIFFEID: {{ $f.endpointSPIFFEID | default (printf "spiffe://%s/spire/server" $f.trustDomain) }}
+  # Bootstrap bundle for the https_spiffe endpoint. After the first fetch, SPIRE
+  # keeps it fresh from the endpoint using the peer's refresh_hint.
+  trustDomainBundle: {{ $f.trustDomainBundle | fromJson | toJson | quote }}
+---
+# Pods matching podSelector get the usual ns/sa SPIFFE ID plus trust domain B's
+# bundle. Every other pod falls through to the upstream chart's fallback
+# ClusterSPIFFEID and only trusts its own domain.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: federated-with-{{ $f.name }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+spec:
+  className: {{ $f.className }}
+  spiffeIDTemplate: {{ printf "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}" | quote }}
+  podSelector:
+    {{- toYaml $f.podSelector | nindent 4 }}
+  federatesWith:
+    - {{ $f.trustDomain }}
+{{- end }}

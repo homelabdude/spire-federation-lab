@@ -1,0 +1,126 @@
+# SPIRE -> Entra ID workload identity test pod. Rendered by run.sh with envsubst.
+#
+#   init: spiffe-helper fetches a JWT-SVID (audience ${AUDIENCE}) from the SPIRE agent
+#         and writes it to /svid/jwt.token, then exits
+#   main: exchanges it with Entra ID (client credentials with a federated client assertion)
+#         MODE=storage: for a Storage token, then reads and tries to write the test blob
+#         MODE=kube:    for a homelab-kube-apiserver token, then calls the API server
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${NAME}-helper
+  namespace: ${NS}
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/svid"
+    daemon_mode = false
+    svid_file_name = "svid.pem"
+    svid_key_file_name = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    jwt_svids = [{ jwt_audience = "${AUDIENCE}", jwt_svid_file_name = "jwt.token" }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${NAME}
+  namespace: ${NS}
+spec:
+  serviceAccountName: ${SA}
+  # No service account token in the pod, so every API server call below can only
+  # authenticate with the Entra token.
+  automountServiceAccountToken: false
+  # OnFailure: the init container retries until the pod's registration entry reaches the agent.
+  restartPolicy: OnFailure
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    - name: spiffe-helper
+      image: ghcr.io/spiffe/spiffe-helper:0.11.0
+      args: ["-config", "/etc/spiffe-helper/helper.conf"]
+      securityContext: &restricted
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - { name: spiffe, mountPath: /spiffe-workload-api, readOnly: true }
+        - { name: helper-conf, mountPath: /etc/spiffe-helper, readOnly: true }
+        - { name: svid, mountPath: /svid }
+  containers:
+    - name: azure
+      image: curlimages/curl:8.16.0
+      securityContext: *restricted
+      volumeMounts:
+        - { name: svid, mountPath: /svid, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+        - { name: kube-ca, mountPath: /kube-ca, readOnly: true }
+      env:
+        - { name: MODE, value: "${MODE}" }
+        - { name: TENANT_ID, value: "${TENANT_ID}" }
+        - { name: CLIENT_ID, value: "${CLIENT_ID}" }
+        - { name: BLOB_URL, value: "${BLOB_URL}" }
+        - { name: KUBE_APP_ID, value: "${KUBE_APP_ID}" }
+        - { name: NS, value: "${NS}" }
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          field() { sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p"; }
+          claims() { cut -d. -f2 | tr '_-' '/+' | awk '{n=length($0)%4; if(n) $0=$0 substr("===",1,4-n); print}' | base64 -d 2>/dev/null; }
+          SVID=$(cat /svid/jwt.token 2>/dev/null)
+          if [ -z "$SVID" ]; then echo "SVID=missing"; exit 0; fi
+          echo "SVID=$(echo "$SVID" | claims)"
+
+          if [ "$MODE" = kube ]; then SCOPE="$KUBE_APP_ID/.default"; else SCOPE=https://storage.azure.com/.default; fi
+          RESP=$(curl -sS -X POST "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+            -d grant_type=client_credentials \
+            -d client_id="$CLIENT_ID" \
+            --data-urlencode scope="$SCOPE" \
+            --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+            -d client_assertion="$SVID")
+          AT=$(echo "$RESP" | field access_token)
+          if [ -z "$AT" ]; then
+            echo "TOKEN_EXCHANGE=failed $(echo "$RESP" | sed -n 's/.*"error_codes":\[\([0-9]*\).*/AADSTS\1/p')"
+            echo "error_description: $(echo "$RESP" | field error_description | cut -c1-300)"
+            exit 0
+          fi
+          echo "TOKEN_EXCHANGE=ok"
+          echo "azure token: $(echo "$AT" | claims | sed 's/"xms_[^,]*,//g' | cut -c1-400)"
+
+          if [ "$MODE" = kube ]; then
+            API=https://kubernetes.default.svc
+            # kube-apiserver pretty-prints JSON for curl's user agent, so flatten it before parsing.
+            k() { curl -sS --cacert /kube-ca/ca.crt -H "Authorization: Bearer $AT" -o /tmp/raw -w '%{http_code}' "$@"; tr -d '\n' </tmp/raw | tr -s ' ' >/tmp/resp; }
+            CODE=$(k -X POST -H 'Content-Type: application/json' \
+              -d '{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}' \
+              "$API/apis/authentication.k8s.io/v1/selfsubjectreviews")
+            echo "KUBE_WHOAMI=$CODE $(sed -n 's/.*"userInfo": *\({[^}]*}\).*/\1/p' /tmp/resp)"
+            CODE=$(k "$API/api/v1/namespaces/$NS/pods")
+            echo "KUBE_LIST_PODS=$CODE"
+            CODE=$(k -X POST -H 'Content-Type: application/json' \
+              -d '{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"written-by-svid"}}' \
+              "$API/api/v1/namespaces/$NS/configmaps")
+            echo "KUBE_CREATE_CONFIGMAP=$CODE $(field reason </tmp/resp)"
+            exit 0
+          fi
+
+          CODE=$(curl -sS -o /tmp/blob -w '%{http_code}' -H "Authorization: Bearer $AT" -H "x-ms-version: 2023-11-03" "$BLOB_URL")
+          echo "BLOB_READ=$CODE $(head -c 200 /tmp/blob)"
+          CODE=$(curl -sS -o /tmp/put -w '%{http_code}' -X PUT -H "Authorization: Bearer $AT" -H "x-ms-version: 2023-11-03" \
+            -H "x-ms-blob-type: BlockBlob" --data-binary "should not be allowed" "${BLOB_URL%/*}/written-by-svid.txt")
+          echo "BLOB_WRITE=$CODE $(sed -n 's/.*<Code>\(.*\)<\/Code>.*/\1/p' /tmp/put)"
+  volumes:
+    - name: spiffe
+      csi: { driver: csi.spiffe.io, readOnly: true }
+    - name: helper-conf
+      configMap: { name: ${NAME}-helper }
+    - name: svid
+      emptyDir: { medium: Memory }
+    - name: tmp
+      emptyDir: { medium: Memory }
+    - name: kube-ca
+      configMap: { name: kube-root-ca.crt }

@@ -1,0 +1,9 @@
+tenant_id = "00000000-0000-0000-0000-000000000000"
+# sp_login_test = true   # throwaway SP + 7-day secret to test `kubelogin --login spn`
+# cluster_admin_object_ids = ["<user-object-id>"]  # defaults to whoever runs terraform
+
+# --- Later stage: SPIRE -> Entra ID workload identity (needs SPIRE and a public issuer) ---
+# enable_spire_workload_identity = true
+# subscription_id                = "00000000-0000-0000-0000-000000000000"
+# spire_issuer_url               = "https://spire-k8s.example.com"   # exactly the SVID iss, no trailing slash
+# spire_workload_spiffe_id       = "spiffe://k8s.spire-lab.internal/ns/spire-demo/sa/azure-client"
