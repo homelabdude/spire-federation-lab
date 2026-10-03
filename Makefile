@@ -87,3 +87,49 @@ cluster-wipe: cluster-uninstall ## Uninstall and delete all SPIRE data and CRDs 
 	-kubectl delete pvc -n spire-server --all --ignore-not-found --wait
 	-kubectl delete namespace spire-server spire-system $(SPIRE_RELEASE_NS) --ignore-not-found --wait
 	-kubectl delete crd $(SPIRE_CRDS) --ignore-not-found --wait
+
+# --- CI (also run by .github/workflows/ci.yml) ------------------------------------
+# No cluster or Azure credentials needed. Renders use the committed example values.
+
+TF_DIR := azure/terraform
+VALUES_EXAMPLE := cluster/values.local.example.yaml
+CI_HELM = helm template $(SPIRE_RELEASE) $(CHART) -n $(SPIRE_RELEASE_NS) -f $(VALUES_EXAMPLE)
+CI_SHELL_SCRIPTS := tests/azure-fic/run.sh azure/terraform/scripts/kubeadm-config-entra.sh
+
+.PHONY: ci ci-terraform ci-helm ci-shell
+
+ci: ci-terraform ci-helm ci-shell ## Run all CI checks locally (terraform, helm, shellcheck)
+
+# Separate data dir: a local .terraform/ with the azurerm backend configured makes even
+# `init -backend=false` authenticate to it. This also leaves the real .terraform/ untouched.
+# azurerm 5.x asks the Azure CLI for a subscription when none is set, even for validate. A
+# placeholder ID skips that, so no Azure login is needed (validate never calls Azure).
+ci-terraform: export TF_DATA_DIR := $(CURDIR)/out/ci-terraform
+ci-terraform: export ARM_SUBSCRIPTION_ID := 00000000-0000-0000-0000-000000000000
+ci-terraform: ## terraform fmt -check, init (no backend), validate
+	terraform -chdir=$(TF_DIR) fmt -check -recursive -diff
+	terraform -chdir=$(TF_DIR) init -backend=false -input=false >/dev/null
+	terraform -chdir=$(TF_DIR) validate
+
+ci-helm: chart-deps ## helm lint + render the chart (must pass) + invalid values (must fail)
+	helm lint $(CHART) -f $(VALUES_EXAMPLE)
+	@echo "render: default"
+	@$(CI_HELM) >/dev/null
+	@echo "render: federation enabled"
+	@echo '{"keys":[],"spiffe_refresh_hint":300}' >/tmp/ci-vm.bundle.json
+	@$(CI_HELM) --set federation.enabled=true --set-file federation.trustDomainBundle=/tmp/ci-vm.bundle.json \
+		--show-only templates/federation.yaml | grep -q 'kind: ClusterFederatedTrustDomain'
+	@echo "render: gateway listener"
+	@$(CI_HELM) --set gateway.renderListener=true --show-only templates/gateway-listener.yaml | grep -q 'name: spire-oidc'
+	@echo "must fail: no environment values"
+	@! helm template $(SPIRE_RELEASE) $(CHART) -n $(SPIRE_RELEASE_NS) >/dev/null 2>&1
+	@echo "must fail: jwksUri doesn't match oidcHost"
+	@! $(CI_HELM) --set spire.spiffe-oidc-discovery-provider.config.jwksUri=https://wrong.example.com/keys >/dev/null 2>&1
+	@echo "must fail: federation enabled without a bundle"
+	@! $(CI_HELM) --set federation.enabled=true >/dev/null 2>&1
+	@echo "helm: ok"
+
+ci-shell: ## shellcheck the scripts that change a live cluster (falls back to the shellcheck image)
+	@if command -v shellcheck >/dev/null; then shellcheck $(CI_SHELL_SCRIPTS); \
+	else docker run --rm -v "$(CURDIR):/mnt:ro" -w /mnt koalaman/shellcheck:stable $(CI_SHELL_SCRIPTS); fi
+	@echo "shellcheck: ok"

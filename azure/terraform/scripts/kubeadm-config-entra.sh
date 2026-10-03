@@ -93,9 +93,10 @@ cmd_set() {  # enable | disable
   assert_only_ours "$WORK/cc-old.yaml"
 
   mkdir -p "$REPO/out"
-  local backup="$REPO/out/kubeadm-config.$(date +%Y%m%d-%H%M%S).json"
+  local backup
+  backup="$REPO/out/kubeadm-config.$(date +%Y%m%d-%H%M%S).json"
   cp "$WORK/cm.json" "$backup"
-  echo "backup: ${backup#$REPO/}"
+  echo "backup: ${backup#"$REPO"/}"
 
   # New ClusterConfiguration: the old one without its apiServer block, plus ours, keeping
   # kubeadm's alphabetical key order (apiServer sorts first).

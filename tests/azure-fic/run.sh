@@ -61,6 +61,7 @@ KUBE_APP_ID=$(tf kube_apiserver_client_id)
 if [[ "${1:-}" == "shell" ]]; then
   export NS=spire-demo
   ensure_ns_sa "$NS" azure-client
+  # shellcheck disable=SC2016 # literal ${VAR} list: tells envsubst which variables to replace
   envsubst '${NS} ${TENANT_ID} ${CLIENT_ID} ${KUBE_APP_ID} ${KUBECTL_VERSION}' <shell.yaml.tmpl | kubectl apply -f - >/dev/null
   kubectl -n "$NS" wait pod/fic-shell --for=condition=Ready --timeout=180s >/dev/null
   cat <<EOF
@@ -87,9 +88,11 @@ for c in "${ORDER[@]}"; do
   export NS SA AUDIENCE MODE NAME="fic-$c"
   echo "=== $c: spiffe://.../ns/$NS/sa/$SA, aud=$AUDIENCE, $MODE (expect $EXPECT)"
   ensure_ns_sa "$NS" "$SA"
+  # shellcheck disable=SC2016 # literal ${VAR} list: tells envsubst which variables to replace
   envsubst '${NS} ${SA} ${AUDIENCE} ${MODE} ${NAME} ${TENANT_ID} ${CLIENT_ID} ${BLOB_URL} ${KUBE_APP_ID}' <pod.yaml.tmpl | kubectl apply -f - >/dev/null
   kubectl -n "$NS" wait "pod/$NAME" --for=jsonpath='{.status.phase}'=Succeeded --timeout=180s >/dev/null
   out=$(kubectl -n "$NS" logs "$NAME" -c azure)
+  # shellcheck disable=SC2001 # indents every line of multi-line output
   echo "$out" | sed 's/^/    /'
   kubectl -n "$NS" delete pod "$NAME" --wait=false >/dev/null
   kubectl -n "$NS" delete configmap "$NAME-helper" >/dev/null
@@ -102,16 +105,24 @@ for c in "${ORDER[@]}"; do
   if [[ $svid_ok -ne 1 ]]; then
     echo "    FAIL (no SVID for ns/$NS/sa/$SA with aud $AUDIENCE was presented)"; fail=1
   elif [[ $EXPECT == allowed ]]; then
-    grep -q '^TOKEN_EXCHANGE=ok' <<<"$out" && grep -q '^BLOB_READ=200' <<<"$out" && grep -q '^BLOB_WRITE=403' <<<"$out" \
-      && echo "    PASS" || { echo "    FAIL"; fail=1; }
+    if grep -q '^TOKEN_EXCHANGE=ok' <<<"$out" && grep -q '^BLOB_READ=200' <<<"$out" && grep -q '^BLOB_WRITE=403' <<<"$out"; then
+      echo "    PASS"
+    else
+      echo "    FAIL"; fail=1
+    fi
   elif [[ $EXPECT == viewer ]]; then
-    grep -q '^TOKEN_EXCHANGE=ok' <<<"$out" \
+    if grep -q '^TOKEN_EXCHANGE=ok' <<<"$out" \
       && grep -q '^KUBE_WHOAMI=201 .*"entra:role:Cluster.Viewer"' <<<"$out" \
       && grep -q '^KUBE_LIST_PODS=200' <<<"$out" \
-      && grep -q '^KUBE_CREATE_CONFIGMAP=403' <<<"$out" \
-      && echo "    PASS" || { echo "    FAIL"; fail=1; }
+      && grep -q '^KUBE_CREATE_CONFIGMAP=403' <<<"$out"; then
+      echo "    PASS"
+    else
+      echo "    FAIL"; fail=1
+    fi
+  elif grep -q "^TOKEN_EXCHANGE=failed $EXPECT\$" <<<"$out"; then
+    echo "    PASS"
   else
-    grep -q "^TOKEN_EXCHANGE=failed $EXPECT\$" <<<"$out" && echo "    PASS" || { echo "    FAIL (expected $EXPECT)"; fail=1; }
+    echo "    FAIL (expected $EXPECT)"; fail=1
   fi
 done
 exit $fail

@@ -1,4 +1,6 @@
 # spire-federation-lab [Work in progress]
+[![ci](https://github.com/homelabdude/spire-federation-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/homelabdude/spire-federation-lab/actions/workflows/ci.yml)
+
 A repo to try SPIRE on Kubernetes, SPIRE-to-SPIRE federation, and secretless Azure access via Entra ID Federated Identity Credentials, all with Terraform, Ansible and Helm.
 
 ```
@@ -146,3 +148,23 @@ published SHA-256.
 The SVID lives 15 minutes (`defaultJwtSvidTTL`), but the Entra access token it's exchanged for lives about 24 hours.
 Removing a pod's SPIRE registration stops new exchanges, not tokens already issued. To cut access off immediately,
 remove the Azure role assignment or the federated identity credential.
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and on pull requests. It only does
+static checks: no cluster and no Azure credentials. Each job runs a Makefile target, so the same checks run locally with
+`make ci`, or one at a time:
+
+| Target | Checks | Fails when |
+|---|---|---|
+| `make ci-terraform` | `terraform fmt -check -recursive`, `init -backend=false`, `validate` in `azure/terraform` | any file isn't `terraform fmt`-formatted, or the configuration doesn't validate |
+| `make ci-helm` | `helm lint`, then `helm template` of `cluster/chart` with `cluster/values.local.example.yaml`: the default render, federation enabled (dummy bundle), and the Gateway listener render | lint fails, or any render fails or is missing its expected resource |
+| | Plus three renders that **must fail**: no environment values, a `jwksUri` that doesn't match `oidcHost`, federation enabled without a bundle | any of them renders, meaning the chart's input checks (`_validate.tpl` and upstream strict mode) stopped catching bad values |
+| `make ci-shell` | `shellcheck` on `tests/azure-fic/run.sh` and `azure/terraform/scripts/kubeadm-config-entra.sh` | shellcheck reports anything. Intentional exceptions are marked inline with `# shellcheck disable=…` and a reason. |
+
+`ci-terraform` uses its own data directory (`out/ci-terraform`), so it never touches a local `.terraform/` set up for the
+real backend. It sets a placeholder `ARM_SUBSCRIPTION_ID`, because `azurerm` otherwise asks the Azure CLI for a subscription
+even for `validate`. `ci-shell` falls back to the `koalaman/shellcheck` image if `shellcheck` isn't installed.
+
+Not covered by CI: anything that needs the live cluster or Azure (`make cluster-install`, `terraform plan`/`apply`,
+`tests/azure-fic/run.sh`).
