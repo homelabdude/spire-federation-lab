@@ -1,0 +1,44 @@
+# Weekly dependency updates. Minor and patch bumps are grouped into one PR per ecosystem;
+# majors come as separate PRs so they get looked at on their own. The cooldown skips
+# versions released in the last few days, so a broken or compromised release has time to
+# be pulled before it lands here.
+version: 2
+
+updates:
+  # Actions used by .github/workflows/ci.yml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
+
+  # azuread, azurerm, random, time (versions.tf constraints and .terraform.lock.hcl)
+  - package-ecosystem: terraform
+    directory: /azure/terraform
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      terraform-providers:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: terraform
+
+  # spiffe/spire chart dependency (Chart.yaml and Chart.lock).
+  # spire-crds is pinned separately in the Makefile (SPIRE_CRDS_CHART_VERSION), which
+  # Dependabot doesn't update: check whether a spire bump needs a matching spire-crds bump.
+  - package-ecosystem: helm
+    directory: /cluster/chart
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: helm
