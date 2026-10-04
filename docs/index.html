@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spire-federation-lab docs</title>
+<!-- Root-relative: served by the user site (homelabdude.github.io) at the same domain -->
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<style>
+  :root { --bg: #fbfbfa; --panel: #fff; --ink: #1f2328; --muted: #656d76; --line: #d0d7de; --link: #0b5cad; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --panel: #161a20; --ink: #e6e8eb; --muted: #9aa4af; --line: #2d333b; --link: #6cb6ff; }
+  }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 24px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { color: var(--muted); margin: 0 0 24px; }
+  a { color: var(--link); }
+  .card { display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 12px; text-decoration: none; color: var(--ink); }
+  .card:hover { border-color: var(--link); }
+  .card b { color: var(--link); }
+  .card span { display: block; color: var(--muted); font-size: 14px; margin-top: 4px; }
+  .back { display: inline-block; font-size: 14px; margin-bottom: 18px; text-decoration: none; }
+  footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <a class="back" href="/">← all project docs</a> · <a class="back" href="https://homelabdude.com">homelabdude.com</a>
+  <h1>spire-federation-lab</h1>
+  <p>Docs for <a href="https://github.com/homelabdude/spire-federation-lab">homelabdude/spire-federation-lab</a>:
+     SPIRE on Kubernetes, Entra ID sign-in for an on-prem cluster, and SPIRE → Entra ID workload identity.</p>
+
+  <a class="card" href="spire-to-entra-flow.html">
+    <b>SPIRE → Entra ID, step by step</b>
+    <span>Interactive walkthrough: a pod swaps its SPIRE JWT-SVID for an Entra token to read Azure Storage, call
+      kube-apiserver and read Key Vault secrets, plus the ways it's rejected.</span>
+  </a>
+
+  <footer>
+    These docs and interactive walkthroughs are AI-generated illustrations, checked against the lab. Values shown are
+    placeholders or examples. The <a href="https://github.com/homelabdude/spire-federation-lab">repo</a>'s READMEs and
+    code are the source of truth.
+  </footer>
+</main>
+</body>
+</html>

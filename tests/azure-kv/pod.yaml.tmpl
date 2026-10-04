@@ -1,0 +1,128 @@
+# SPIRE -> Entra ID -> Key Vault test pod. Rendered by run.sh with envsubst.
+#
+#   init: spiffe-helper fetches the pod's JWT-SVID and writes it to /svid/jwt.token, then exits
+#   main: MODE=rest  exchanges the SVID for a Key Vault token with curl and GETs ${SECRET_NAME}
+#         MODE=sdk   reads ${SECRET_NAME} with the Azure SDK's DefaultAzureCredential, which picks
+#                    up the SVID from AZURE_FEDERATED_TOKEN_FILE (no SPIRE-specific code)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${NAME}-helper
+  namespace: ${NS}
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/svid"
+    daemon_mode = false
+    svid_file_name = "svid.pem"
+    svid_key_file_name = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    jwt_svids = [{ jwt_audience = "api://AzureADTokenExchange", jwt_svid_file_name = "jwt.token" }]
+  rest.sh: |
+    field() { sed -n "s/.*\"$1\": *\"\([^\"]*\)\".*/\1/p"; }
+    claims() { cut -d. -f2 | tr '_-' '/+' | awk '{n=length($0)%4; if(n) $0=$0 substr("===",1,4-n); print}' | base64 -d 2>/dev/null; }
+    SVID=$(cat /svid/jwt.token 2>/dev/null)
+    [ -n "$SVID" ] || { echo "SVID=missing"; exit 0; }
+    echo "SVID=$(echo "$SVID" | claims)"
+    RESP=$(curl -sS -X POST "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+      -d grant_type=client_credentials \
+      -d client_id="$AZURE_CLIENT_ID" \
+      --data-urlencode scope=https://vault.azure.net/.default \
+      --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+      -d client_assertion="$SVID")
+    AT=$(echo "$RESP" | field access_token)
+    if [ -z "$AT" ]; then
+      echo "TOKEN_EXCHANGE=failed $(echo "$RESP" | sed -n 's/.*"error_codes":\[\([0-9]*\).*/AADSTS\1/p')"
+      echo "error_description: $(echo "$RESP" | field error_description | cut -c1-300)"
+      exit 0
+    fi
+    echo "TOKEN_EXCHANGE=ok"
+    echo "azure token: $(echo "$AT" | claims | sed 's/"xms_[^,]*,//g' | cut -c1-300)"
+    CODE=$(curl -sS -o /tmp/kv -w '%{http_code}' -H "Authorization: Bearer $AT" \
+      "$VAULT_URI/secrets/$SECRET_NAME?api-version=7.4")
+    if [ "$CODE" = 200 ]; then
+      echo "KV_GET=$CODE $(field value </tmp/kv)"
+    else
+      echo "KV_GET=$CODE $(sed -n 's/.*"innererror":{"code":"\([^"]*\)".*/\1/p' /tmp/kv) $(field code </tmp/kv)"
+    fi
+  sdk.py: |
+    import json, os, base64
+    from azure.identity import DefaultAzureCredential
+    from azure.keyvault.secrets import SecretClient
+    from azure.core.exceptions import HttpResponseError
+
+    svid = open(os.environ["AZURE_FEDERATED_TOKEN_FILE"]).read().split(".")[1]
+    print("SVID=" + base64.urlsafe_b64decode(svid + "=" * (-len(svid) % 4)).decode())
+    client = SecretClient(vault_url=os.environ["VAULT_URI"], credential=DefaultAzureCredential())
+    try:
+        s = client.get_secret(os.environ["SECRET_NAME"])
+        print("TOKEN_EXCHANGE=ok")
+        print(f"KV_GET=200 {s.value}")
+    except HttpResponseError as e:
+        print("TOKEN_EXCHANGE=ok")
+        print(f"KV_GET={e.status_code} {getattr(e.error, 'code', '')}")
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${NAME}
+  namespace: ${NS}
+spec:
+  serviceAccountName: ${SA}
+  automountServiceAccountToken: false
+  # OnFailure: the init container retries until the pod's registration entry reaches the agent.
+  restartPolicy: OnFailure
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    - name: spiffe-helper
+      image: ghcr.io/spiffe/spiffe-helper:0.11.0
+      args: ["-config", "/etc/kv-test/helper.conf"]
+      securityContext: &restricted
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - { name: spiffe, mountPath: /spiffe-workload-api, readOnly: true }
+        - { name: conf, mountPath: /etc/kv-test, readOnly: true }
+        - { name: svid, mountPath: /svid }
+  containers:
+    - name: kv
+      image: ${IMAGE}
+      securityContext: *restricted
+      env:
+        - { name: AZURE_TENANT_ID, value: "${TENANT_ID}" }
+        - { name: AZURE_CLIENT_ID, value: "${CLIENT_ID}" }
+        - { name: AZURE_FEDERATED_TOKEN_FILE, value: /svid/jwt.token }
+        - { name: VAULT_URI, value: "${VAULT_URI}" }
+        - { name: SECRET_NAME, value: "${SECRET_NAME}" }
+        - { name: HOME, value: /tmp }
+        - { name: PYTHONPATH, value: /tmp/py }
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          if [ "${MODE}" = sdk ]; then
+            pip install --quiet --disable-pip-version-check --no-cache-dir --target /tmp/py \
+              azure-identity azure-keyvault-secrets >/tmp/pip.log 2>&1 || { echo "PIP=failed"; tail -3 /tmp/pip.log; exit 0; }
+            python /etc/kv-test/sdk.py
+          else
+            sh /etc/kv-test/rest.sh
+          fi
+      volumeMounts:
+        - { name: svid, mountPath: /svid, readOnly: true }
+        - { name: conf, mountPath: /etc/kv-test, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: spiffe
+      csi: { driver: csi.spiffe.io, readOnly: true }
+    - name: conf
+      configMap: { name: ${NAME}-helper }
+    - name: svid
+      emptyDir: { medium: Memory }
+    - name: tmp
+      emptyDir: { medium: Memory }

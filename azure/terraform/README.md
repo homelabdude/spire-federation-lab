@@ -508,3 +508,46 @@ a path. Tests are in [`tests/azure-fic`](../../tests/azure-fic) (see the root RE
 To remove it: `kubectl delete clusterrolebinding entra-cluster-viewers`, then set `enable_spire_workload_identity = false`
 and apply. That deletes the resource group, the managed identity and its federated credential, the storage account,
 and the `Cluster.Viewer` role.
+
+## Later stage: SPIRE → Entra ID → Key Vault
+
+Workloads read their secrets straight from Azure Key Vault with their SPIRE identity. There are no Kubernetes Secrets,
+no CSI driver and no secrets-syncing controller. Needs `enable_spire_workload_identity` (it reuses its resource group,
+subscription and issuer).
+
+It creates, in the same resource group:
+
+- **User-assigned managed identity** `spire-lab-kv-reader`, with its own **federated identity credential**
+  (`sub` = `spire_kv_spiffe_id`, a different SPIFFE ID from the blob test)
+- **Key Vault** `spirekv<suffix>` with **Azure RBAC** for the data plane (`rbac_authorization_enabled = true`). No access
+  policies are defined, and Key Vault ignores them in this mode.
+- **Two secrets** (demo values): `app-db-password`, which the workload may read, and `other-team-secret`, which it may not
+- **Key Vault Secrets User** for the managed identity, scoped to **the one secret**, not the vault (a per-secret scope is
+  only possible with RBAC; access policies are vault-wide)
+- **Key Vault Secrets Officer** for the user running Terraform on the vault, so it can create the secrets
+
+The demo secret values are stored in Terraform state. For real secrets, use `value_wo` (write-only, never stored in
+state), which needs Terraform 1.11 or later.
+
+Register the resource provider (one-off, free):
+
+```sh
+az provider register --namespace Microsoft.KeyVault --wait
+```
+
+Then in `terraform.tfvars`:
+
+```hcl
+enable_spire_keyvault = true
+spire_kv_spiffe_id    = "spiffe://<trust-domain>/ns/spire-demo/sa/kv-reader"
+```
+
+```sh
+terraform apply
+terraform output spire_kv_federated_credential
+terraform output spire_kv_vault_uri
+```
+
+Tests are in [`tests/azure-kv`](../../tests/azure-kv) (see the root README). Setting `enable_spire_keyvault = false` and
+applying removes all of it, and the provider purges the vault rather than leaving it soft-deleted
+(`features { key_vault { purge_soft_delete_on_destroy = true } }`).

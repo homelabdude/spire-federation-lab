@@ -26,14 +26,20 @@ provider "azuread" {
   tenant_id = var.tenant_id
 }
 
-# Only used by workload-identity.tf (enable_spire_workload_identity). With the feature
+# Only used by workload-identity.tf and keyvault.tf (feature flags). With the features
 # off, no azurerm resources exist and subscription_id can stay unset.
 provider "azurerm" {
-  features {}
+  features {
+    key_vault {
+      # Lab: destroying the vault purges it instead of leaving it soft-deleted for 7 days.
+      purge_soft_delete_on_destroy = true
+    }
+  }
   tenant_id       = var.tenant_id
   subscription_id = var.subscription_id
   # Don't auto-register resource providers on the subscription. The ones this uses
-  # (Microsoft.ManagedIdentity, Microsoft.Storage) are registered explicitly (see README).
+  # (Microsoft.ManagedIdentity, Microsoft.Storage, Microsoft.KeyVault) are registered
+  # explicitly (see README).
   resource_provider_registrations = "none"
   # The test storage account has shared keys disabled, so blob operations use Entra ID.
   storage_use_azuread = true

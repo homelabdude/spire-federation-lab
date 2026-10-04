@@ -47,6 +47,18 @@ variable "spire_workload_spiffe_id" {
   default     = ""
 }
 
+variable "enable_spire_keyvault" {
+  description = "Create a Key Vault (Azure RBAC) with two secrets and a managed identity, federated with SPIRE, that may read only one of them. Needs enable_spire_workload_identity."
+  type        = bool
+  default     = false
+}
+
+variable "spire_kv_spiffe_id" {
+  description = "SPIFFE ID of the workload allowed to read the Key Vault secret (subject of its federated credential)."
+  type        = string
+  default     = ""
+}
+
 variable "workload_identity_resource_group" {
   description = "Resource group for the workload identity resources. Kept separate from the Terraform state resource group."
   type        = string

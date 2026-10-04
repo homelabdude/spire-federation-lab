@@ -17,9 +17,10 @@ spire-federation-lab/
 ├── azure/terraform/                  # Entra ID sign-in for kubectl; managed identity + FIC trusting SPIRE (feature flag)
 ├── oidc-public/                      # public HTTPS for the OIDC issuer (todo)
 ├── docs/
-│   └── spire-to-entra-flow.html      # interactive walkthrough of the SPIRE -> Entra ID -> Azure / kube-apiserver flow
+│   └── spire-to-entra-flow.html      # interactive walkthrough: SPIRE -> Entra ID -> Storage / kube-apiserver / Key Vault
 └── tests/
-    └── azure-fic/                    # SPIRE -> Entra ID token exchange, Storage and kube-apiserver, negative cases
+    ├── azure-fic/                    # SPIRE -> Entra ID token exchange, Storage and kube-apiserver, negative cases
+    └── azure-kv/                     # SPIRE -> Entra ID -> Key Vault: per-secret RBAC, Azure SDK, exec-able shell pod
 ```
 
 ## Trust domain A: SPIRE on Kubernetes
@@ -106,6 +107,35 @@ behind `enable_spire_workload_identity`.
 
 [`docs/spire-to-entra-flow.html`](docs/spire-to-entra-flow.html) walks through the flow step by step. Open it in a browser.
 
+### Setup
+
+Needs SPIRE running and the [public OIDC issuer](#public-oidc-issuer) reachable from the internet. Check from outside your
+network that `https://<oidcHost>/.well-known/openid-configuration` and `/keys` return the issuer and an RSA key. Creating
+the federated credential doesn't contact the issuer, but every token exchange does, and an unreachable issuer only shows
+up then, as a vague `AADSTS50166`.
+
+1. Register the resource provider (one-off, free):
+   ```sh
+   az provider register --namespace Microsoft.ManagedIdentity --wait
+   ```
+2. In `azure/terraform/terraform.tfvars`, turn the feature on:
+   ```hcl
+   enable_spire_workload_identity = true
+   subscription_id                = "<subscription-id>"
+   spire_issuer_url               = "https://<oidcHost>"   # exactly the SVID iss claim, no trailing slash
+   spire_workload_spiffe_id       = "spiffe://<trust-domain>/ns/spire-demo/sa/azure-client"
+   ```
+3. Apply, and bind the `Cluster.Viewer` role in the cluster:
+   ```sh
+   cd azure/terraform
+   terraform plan      # managed identity, federated credential, test storage, Cluster.Viewer role + assignment
+   terraform apply
+   terraform output spire_federated_credential                  # issuer / subject / audience Entra will match
+   terraform output -raw cluster_viewers_rbac | kubectl apply -f -
+   ```
+
+What each resource is for: [`azure/terraform/README.md`](azure/terraform/README.md#later-stage-spire--entra-id-workload-identity).
+
 ### Tests
 
 ```sh
@@ -148,6 +178,68 @@ published SHA-256.
 The SVID lives 15 minutes (`defaultJwtSvidTTL`), but the Entra access token it's exchanged for lives about 24 hours.
 Removing a pod's SPIRE registration stops new exchanges, not tokens already issued. To cut access off immediately,
 remove the Azure role assignment or the federated identity credential.
+
+## SPIRE → Entra ID → Key Vault
+
+Workloads read secrets from Azure Key Vault with their SPIRE identity: the same SVID → Entra token swap, with the scope
+`https://vault.azure.net/.default`. Secrets never become Kubernetes Secrets (nothing in etcd), there's no CSI driver or
+syncing controller holding secrets for other pods, and each SPIFFE ID's managed identity can read only the secrets it's
+granted. Access uses Azure RBAC only, scoped per secret, with no access policies.
+
+### Setup
+
+Needs the [workload identity setup](#setup) above.
+
+```sh
+az provider register --namespace Microsoft.KeyVault --wait
+```
+
+In `azure/terraform/terraform.tfvars`:
+
+```hcl
+enable_spire_keyvault = true
+spire_kv_spiffe_id    = "spiffe://<trust-domain>/ns/spire-demo/sa/kv-reader"
+```
+
+```sh
+cd azure/terraform && terraform apply
+```
+
+This creates a vault with two secrets (`app-db-password`, `other-team-secret`) and a managed identity that may read only the
+first one. Details: [`azure/terraform/README.md`](azure/terraform/README.md#later-stage-spire--entra-id--key-vault).
+
+### Tests
+
+```sh
+tests/azure-kv/run.sh              # all cases
+tests/azure-kv/run.sh cleanup      # remove the kv-shell pod and the kv-reader service account
+```
+
+| Case | Pod / secret | Expected |
+|---|---|---|
+| `allowed` | `…/sa/kv-reader` reads `app-db-password` with curl | token exchange ok, `KV_GET=200` and the demo value |
+| `denied-secret` | `…/sa/kv-reader` reads `other-team-secret` | token exchange ok, `KV_GET=403 ForbiddenByRbac` (RBAC is on one secret only) |
+| `wrong-sa` | `…/sa/azure-client` presents its SVID for the Key Vault identity | `AADSTS700213` (no federated credential matches the subject) |
+| `sdk` | `…/sa/kv-reader` with the Azure SDK's `DefaultAzureCredential` (Python) | `KV_GET=200` and the demo value |
+
+The `sdk` case uses no SPIRE-specific code. `spiffe-helper` writes the SVID to a file, and `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE` point the SDK at it. Any app built on the Azure SDK works the same
+way. It installs the SDK with `pip` at start, so it needs internet access and takes a little longer.
+
+### Interactive shell
+
+```sh
+tests/azure-kv/run.sh shell
+kubectl -n spire-demo logs kv-shell -c secret-sync     # "app-db-password: synced to /secrets/app-db-password"
+kubectl -n spire-demo exec -it kv-shell -c shell -- sh
+  ls -la /secrets && cat /secrets/app-db-password
+  kv-get other-team-secret                             # HTTP 403 ForbiddenByRbac
+  mount | grep -E '/secrets|/svid'                     # tmpfs: nothing on disk, nothing in etcd
+```
+
+`kv-shell` runs as `spire-demo/kv-reader` with two sidecars. `spiffe-helper` keeps the SVID fresh. `secret-sync`
+swaps it for a Key Vault token every 5 minutes and writes the allowed secret to an in-memory `/secrets` volume, using
+a temp file and a rename so readers never see a half-written value.
 
 ## CI
 

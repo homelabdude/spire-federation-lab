@@ -13,4 +13,6 @@ auth-config.yaml
 *.tfstate.*
 *.tfvars
 tfplan
+tfplan.*
+*.tfplan
 !*.tfvars.example

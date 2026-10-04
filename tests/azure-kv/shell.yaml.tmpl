@@ -1,0 +1,144 @@
+# Interactive SPIRE -> Entra ID -> Key Vault pod. Started with `./run.sh shell`.
+#
+# Runs as spire-demo/kv-reader. Three containers:
+#   spiffe-helper (native sidecar)  keeps a fresh JWT-SVID in /svid/jwt.token
+#   secret-sync   (native sidecar)  every SYNC_INTERVAL: SVID -> Entra token -> Key Vault, and writes
+#                                   each secret in SYNC_SECRETS to /secrets/<name> (in-memory, never
+#                                   a Kubernetes Secret). Logs every sync.
+#   shell                           reads /secrets, plus helpers on PATH:
+#                                     svid            current JWT-SVID claims
+#                                     kv-token        Entra access token for Key Vault
+#                                     kv-get <name>   read a secret directly (try the denied one)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kv-shell
+  namespace: ${NS}
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cert_dir = "/svid"
+    daemon_mode = true
+    svid_file_name = "svid.pem"
+    svid_key_file_name = "svid_key.pem"
+    svid_bundle_file_name = "bundle.pem"
+    jwt_svids = [{ jwt_audience = "api://AzureADTokenExchange", jwt_svid_file_name = "jwt.token" }]
+  svid: |
+    #!/bin/sh
+    cut -d. -f2 /svid/jwt.token | tr '_-' '/+' | awk '{n=length($0)%4; if(n) $0=$0 substr("===",1,4-n); print}' | base64 -d; echo
+  kv-token: |
+    #!/bin/sh
+    # client credentials grant with the SPIRE JWT-SVID as the federated client assertion
+    curl -sS -X POST "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+      -d grant_type=client_credentials \
+      -d client_id="$AZURE_CLIENT_ID" \
+      --data-urlencode scope=https://vault.azure.net/.default \
+      --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+      -d client_assertion="$(cat /svid/jwt.token)" \
+      | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
+  kv-get: |
+    #!/bin/sh
+    # kv-get <secret-name>: prints the value, or the HTTP status and Key Vault error code
+    [ -n "$1" ] || { echo "usage: kv-get <secret-name>" >&2; exit 2; }
+    out=$(mktemp)
+    code=$(curl -sS -o "$out" -w '%{http_code}' -H "Authorization: Bearer $(kv-token)" \
+      "$VAULT_URI/secrets/$1?api-version=7.4")
+    if [ "$code" = 200 ]; then sed -n 's/.*"value":"\([^"]*\)".*/\1/p' "$out"
+    else echo "HTTP $code $(sed -n 's/.*"innererror":{"code":"\([^"]*\)".*/\1/p' "$out")"; fi
+    rm -f "$out"
+  secret-sync: |
+    #!/bin/sh
+    # Wait for the first SVID, then sync every SYNC_INTERVAL seconds. Each secret is written to a
+    # temp file and renamed, so readers never see a half-written value.
+    until [ -s /svid/jwt.token ]; do sleep 1; done
+    while true; do
+      for name in $SYNC_SECRETS; do
+        value=$(kv-get "$name")
+        case "$value" in
+          "HTTP "*) echo "$(date -u +%H:%M:%S) $name: $value" ;;
+          "")       echo "$(date -u +%H:%M:%S) $name: empty response" ;;
+          *)        printf '%s' "$value" > "/secrets/.$name.tmp" && mv "/secrets/.$name.tmp" "/secrets/$name"
+                    echo "$(date -u +%H:%M:%S) $name: synced to /secrets/$name" ;;
+        esac
+      done
+      sleep "$SYNC_INTERVAL"
+    done
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kv-shell
+  namespace: ${NS}
+spec:
+  serviceAccountName: kv-reader
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  initContainers:
+    # Native sidecars (restartPolicy: Always) run for the pod's lifetime.
+    - name: spiffe-helper
+      image: ghcr.io/spiffe/spiffe-helper:0.11.0
+      restartPolicy: Always
+      args: ["-config", "/etc/kv/helper.conf"]
+      securityContext: &restricted
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - { name: spiffe, mountPath: /spiffe-workload-api, readOnly: true }
+        - { name: conf, mountPath: /etc/kv/helper.conf, subPath: helper.conf, readOnly: true }
+        - { name: svid, mountPath: /svid }
+    - name: secret-sync
+      image: curlimages/curl:8.16.0
+      restartPolicy: Always
+      securityContext: *restricted
+      command: ["/opt/kv/secret-sync"]
+      env: &kvenv
+        - { name: AZURE_TENANT_ID, value: "${TENANT_ID}" }
+        - { name: AZURE_CLIENT_ID, value: "${CLIENT_ID}" }
+        - { name: VAULT_URI, value: "${VAULT_URI}" }
+        - { name: SYNC_SECRETS, value: "${SYNC_SECRETS}" }
+        - { name: SYNC_INTERVAL, value: "300" }
+        - { name: PATH, value: "/opt/kv:/usr/local/bin:/usr/bin:/bin" }
+        - { name: HOME, value: /tmp }
+      volumeMounts:
+        - { name: svid, mountPath: /svid, readOnly: true }
+        - { name: scripts, mountPath: /opt/kv, readOnly: true }
+        - { name: secrets, mountPath: /secrets }
+        - { name: tmp, mountPath: /tmp }
+  containers:
+    - name: shell
+      image: curlimages/curl:8.16.0
+      securityContext: *restricted
+      command: ["sleep", "infinity"]
+      env: *kvenv
+      volumeMounts:
+        - { name: svid, mountPath: /svid, readOnly: true }
+        - { name: scripts, mountPath: /opt/kv, readOnly: true }
+        - { name: secrets, mountPath: /secrets, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    - name: spiffe
+      csi: { driver: csi.spiffe.io, readOnly: true }
+    - name: conf
+      configMap: { name: kv-shell }
+    - name: scripts
+      configMap:
+        name: kv-shell
+        defaultMode: 0555
+        items:
+          - { key: svid, path: svid }
+          - { key: kv-token, path: kv-token }
+          - { key: kv-get, path: kv-get }
+          - { key: secret-sync, path: secret-sync }
+    - name: svid
+      emptyDir: { medium: Memory }
+    - name: secrets
+      emptyDir: { medium: Memory }
+    - name: tmp
+      emptyDir: { medium: Memory }

@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPIRE → Entra ID workload identity, step by step</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --ink: #1f2328; --muted: #656d76; --line: #d0d7de;
+    --spire: #2f6f4f; --entra: #0b5cad; --issuer: #8a5a00; --target: #6e40aa; --pod: #b3261e;
+    --active: #0b5cad; --ok: #1a7f37; --bad: #b3261e; --code: #f4f5f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #161a20; --ink: #e6e8eb; --muted: #9aa4af; --line: #2d333b;
+      --spire: #57ab83; --entra: #6cb6ff; --issuer: #e0b050; --target: #b392f0; --pod: #ff7b72;
+      --active: #6cb6ff; --ok: #57ab5a; --bad: #ff7b72; --code: #1c2128;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 20px 28px 8px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  header p { margin: 0; color: var(--muted); max-width: 980px; }
+  header .back { display: inline-block; font-size: 13px; margin-bottom: 8px; color: var(--active); text-decoration: none; }
+  header .disclaimer { margin-top: 6px; font-size: 12.5px; font-style: italic; }
+  header .disclaimer a { color: var(--active); }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; padding: 12px 28px 0; }
+  .tab { border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 6px 12px;
+         border-radius: 999px; cursor: pointer; font: inherit; font-size: 14px; }
+  .tab[aria-selected="true"] { border-color: var(--active); color: var(--active); font-weight: 600; }
+  main { display: grid; grid-template-columns: minmax(640px, 1.35fr) minmax(360px, 1fr); gap: 20px; padding: 16px 28px 28px; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #diagram { padding: 8px; overflow-x: auto; }
+  svg { display: block; width: 100%; height: auto; min-width: 640px; }
+  .controls { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); }
+  .controls button { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px;
+                     padding: 5px 12px; cursor: pointer; font: inherit; font-size: 14px; }
+  .controls button:disabled { opacity: .4; cursor: default; }
+  .controls .count { margin-left: auto; color: var(--muted); font-size: 13px; }
+  #detail { padding: 18px 20px; }
+  #detail h2 { font-size: 17px; margin: 0 0 4px; }
+  #detail .where { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  #detail p { margin: 8px 0; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+        font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; white-space: pre; margin: 10px 0; }
+  .checks { list-style: none; padding: 0; margin: 10px 0; }
+  .checks li { padding: 3px 0 3px 24px; position: relative; }
+  .checks li::before { position: absolute; left: 0; font-weight: 700; }
+  .checks li.ok::before { content: "✓"; color: var(--ok); }
+  .checks li.bad::before { content: "✗"; color: var(--bad); }
+  .note { border-left: 3px solid var(--active); padding: 4px 10px; color: var(--muted); font-size: 14px; }
+  .trust { padding: 14px 20px; margin-top: 16px; }
+  .trust h3 { font-size: 14px; margin: 0 0 8px; }
+  .trust table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  .trust td { padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  .trust td:first-child { font-weight: 600; white-space: nowrap; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  /* svg */
+  .actor-box { fill: var(--panel); stroke-width: 1.5; }
+  .actor-name { font-size: 13px; font-weight: 600; fill: var(--ink); }
+  .actor-sub { font-size: 11px; fill: var(--muted); }
+  .lifeline { stroke: var(--line); stroke-dasharray: 4 4; }
+  .msg { stroke: var(--line); stroke-width: 1.5; fill: none; }
+  .msg-label { font-size: 11.5px; fill: var(--muted); }
+  .msg.done { stroke: var(--muted); }
+  .msg-label.done { fill: var(--ink); }
+  .msg.current { stroke: var(--active); stroke-width: 2.5; }
+  .msg-label.current { fill: var(--active); font-weight: 600; }
+  .msg.bad.current { stroke: var(--bad); }
+  .msg-label.bad.current { fill: var(--bad); }
+  .step-num { font-size: 10.5px; fill: var(--muted); }
+  .note-box { fill: var(--code); stroke: var(--line); }
+  .note-box.current { stroke: var(--active); stroke-width: 2; }
+  .note-box.bad.current { stroke: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="./">← spire-federation-lab docs</a>
+  <h1>SPIRE → Entra ID workload identity, step by step</h1>
+  <p>Picks up after the setup: SPIRE runs in the cluster, its OIDC discovery endpoint is public, and a
+     <b>federated identity credential</b> on a managed identity names that SPIRE issuer. This shows what happens at runtime when a
+     pod uses its SPIRE identity to reach Azure. Use <kbd>←</kbd> <kbd>→</kbd> or the buttons.</p>
+  <p class="disclaimer">AI-generated illustration, checked against the lab. IDs and hostnames are placeholders, and the
+     <a href="https://github.com/homelabdude/spire-federation-lab">repo</a>'s READMEs and code are the source of truth.</p>
+</header>
+
+<div class="tabs" role="tablist" id="tabs"></div>
+
+<main>
+  <div>
+    <div class="card">
+      <div id="diagram"></div>
+      <div class="controls">
+        <button id="first" title="First step">⏮</button>
+        <button id="prev">← Back</button>
+        <button id="next">Next →</button>
+        <button id="play">▶ Play</button>
+        <span class="count" id="count"></span>
+      </div>
+    </div>
+    <div class="card trust">
+      <h3>Who trusts whom (configured before any of this runs)</h3>
+      <table>
+        <tr><td>Entra ID → SPIRE</td><td>The federated identity credential on the managed identity: SVIDs from issuer
+          <code id="t-iss"></code> with subject <code id="t-sub"></code> and audience <code>api://AzureADTokenExchange</code>.
+          Keys come from the issuer's public <code>/keys</code>.</td></tr>
+        <tr><td>Azure Storage → Entra ID</td><td>Azure RBAC: the managed identity has <i>Storage Blob Data Reader</i> on one container.</td></tr>
+        <tr><td>kube-apiserver → Entra ID</td><td><code>AuthenticationConfiguration</code>: Entra v2 issuer, audience = the
+          <code>homelab-kube-apiserver</code> app. <code>roles</code> map to <code>entra:role:&lt;role&gt;</code>, and RBAC binds
+          <code>entra:role:Cluster.Viewer</code> → <code>view</code>.</td></tr>
+        <tr><td>Key Vault → Entra ID</td><td>Azure RBAC only (no access policies): a separate managed identity, federated with
+          <code>…/sa/kv-reader</code>, has <i>Key Vault Secrets User</i> on <b>one secret</b>, not the vault.</td></tr>
+        <tr><td>SPIRE → the pod</td><td>Registration: the pod's namespace and service account decide its SPIFFE ID (ClusterSPIFFEID).</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="card" id="detail" aria-live="polite"></div>
+</main>
+
+<script>
+// Lab values. Edit to match your environment; nothing here is secret.
+const LAB = {
+  issuer: "https://spire-k8s.example.com",
+  trustDomain: "k8s.spire-lab.internal",
+  ns: "spire-demo",
+  sa: "azure-client",
+  tenant: "<tenant-id>",
+  miClientId: "<managed-identity-client-id>",
+  miObjectId: "<managed-identity-object-id>",
+  kubeAppId: "<homelab-kube-apiserver-client-id>",
+  blobUrl: "https://spirefic<suffix>.blob.core.windows.net/fic-test/hello.txt",
+  kvSa: "kv-reader",
+  kvClientId: "<kv-reader-managed-identity-client-id>",
+  vaultUri: "https://spirekv<suffix>.vault.azure.net",
+  kvAllowed: "app-db-password",
+  kvDenied: "other-team-secret",
+};
+const spiffe = (ns, sa) => `spiffe://${LAB.trustDomain}/ns/${ns}/sa/${sa}`;
+const host = LAB.issuer.replace(/^https:\/\//, "");
+
+const ACTORS = [
+  { id: "pod",    name: "Pod",            sub: `${LAB.ns}/${LAB.sa}`,       color: "--pod" },
+  { id: "agent",  name: "SPIRE agent",    sub: "on the pod's node",           color: "--spire" },
+  { id: "server", name: "SPIRE server",   sub: "spire-server-0",              color: "--spire" },
+  { id: "entra",  name: "Entra ID",       sub: "login.microsoftonline.com",   color: "--entra" },
+  { id: "issuer", name: "Public issuer",  sub: host,                          color: "--issuer" },
+  { id: "target", name: "Resource",       sub: "",                            color: "--target" },
+];
+
+// ---- shared steps --------------------------------------------------------------
+
+function svidSteps({ ns = LAB.ns, sa = LAB.sa, aud = "api://AzureADTokenExchange" } = {}) {
+  const sub = spiffe(ns, sa);
+  return [
+    { from: "pod", to: "agent", label: `Workload API: JWT-SVID, aud=${aud}`,
+      title: "The pod asks its local SPIRE agent for a JWT-SVID",
+      where: "Pod → SPIRE agent, over a Unix socket (mounted by the SPIFFE CSI driver)",
+      body: `<p>The pod has no Azure secret and no service account token. It only has a Unix socket to the SPIRE agent on
+        its node. It asks for a <b>JWT-SVID</b> (a SPIFFE identity as a signed JWT) for the audience
+        <code>${aud}</code>, which is the fixed audience Entra expects in federated assertions.</p>
+        <p>In the tests, <code>spiffe-helper</code> does this and writes the token to <code>/svid/jwt.token</code>.</p>` },
+    { self: "agent", label: "Attest the caller: which pod is this?",
+      title: "The agent works out who is asking, without trusting anything the pod says",
+      where: "SPIRE agent (Kubernetes workload attestor)",
+      body: `<p>The pod never states its identity. The agent reads the caller's process ID from the socket, maps it
+        to a container through the kernel's cgroups, and asks the local kubelet which pod that container belongs to:</p>
+        <pre>k8s:ns:${ns}
+k8s:sa:${sa}
+k8s:pod-uid:…</pre>
+        <p>Those selectors match a registration entry created from a <code>ClusterSPIFFEID</code> (here the chart's
+        default: <code>…/ns/{namespace}/sa/{serviceaccount}</code>), which gives the SPIFFE ID
+        <code>${sub}</code>.</p>
+        <div class="note">That's why the namespace and service account are the identity. Anyone who can run a pod
+        as <code>${ns}/${sa}</code> gets this SPIFFE ID, so Kubernetes RBAC on pods and service accounts protects it.</div>` },
+    { from: "agent", to: "server", label: "Sign a JWT-SVID for this SPIFFE ID",
+      title: "The SPIRE server signs the token",
+      where: "SPIRE agent → SPIRE server (the agent authenticates with its own node SVID)",
+      body: `<p>The server checks the agent may mint this identity (the entry's parent is that agent's node), then signs
+        a JWT with its current <b>JWT signing key</b>: RSA-2048, so <code>alg: RS256</code>, which Entra requires.</p>
+        <p>The matching public key is already published in the trust bundle, and therefore at
+        <code>${LAB.issuer}/keys</code>. Keys rotate daily, and the next one is published about 8 hours before it's used.</p>` },
+    { from: "server", to: "pod", via: "agent", label: "JWT-SVID (15 min)",
+      title: "The pod receives its JWT-SVID",
+      where: "SPIRE server → agent → pod",
+      body: `<p>The token the pod will show Entra:</p>
+        <pre>header  { "alg": "RS256", "kid": "pzQ9hIkM…", "typ": "JWT" }
+payload {
+  "iss": "${LAB.issuer}",
+  "sub": "${sub}",
+  "aud": ["${aud}"],
+  "iat": …, "exp": iat + 15 min
+}</pre>
+        <p>These three claims, <b>iss, sub, aud</b>, are exactly what the federated identity credential is matched against.</p>` },
+  ];
+}
+
+function exchangeStep(scopeLabel, scope, clientId = LAB.miClientId, extra = "") {
+  return { from: "pod", to: "entra", label: `POST /token (client_assertion = SVID, scope=${scopeLabel})`,
+    title: "The pod exchanges its SVID for an Entra access token",
+    where: `Pod → https://login.microsoftonline.com/${LAB.tenant}/oauth2/v2.0/token`,
+    body: `${extra}<p>A standard OAuth2 <b>client credentials</b> request. Instead of a client secret, the SVID is sent as
+      a <b>federated client assertion</b>:</p>
+      <pre>grant_type=client_credentials
+client_id=${clientId}          # the managed identity
+scope=${scope}
+client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+client_assertion=&lt;the JWT-SVID&gt;</pre>
+      <p>The pod is saying: "I want a token as this managed identity, and here is proof from an issuer you trust."</p>` };
+}
+
+function verifySteps(ok, failWhy, credSa = LAB.sa) {
+  const lookup = { self: "entra", bad: !ok.match,
+    label: ok.match ? "Find a federated credential matching iss + sub + aud" : `No credential matches → ${failWhy.code}`,
+    title: ok.match ? "Entra looks for a federated credential that matches" : `Entra finds no matching federated credential (${failWhy.code})`,
+    where: "Entra ID, on the managed identity named by client_id",
+    body: `<p>Entra reads the unverified claims and compares them <b>exactly</b> (string equality) with the federated
+      identity credentials on the managed identity:</p>
+      <ul class="checks">
+        <li class="${ok.iss ? "ok" : "bad"}">iss = <code>${LAB.issuer}</code> (no trailing slash)</li>
+        <li class="${ok.sub ? "ok" : "bad"}">sub = <code>${spiffe(LAB.ns, credSa)}</code></li>
+        <li class="${ok.aud ? "ok" : "bad"}">aud contains <code>api://AzureADTokenExchange</code></li>
+      </ul>
+      ${ok.match ? "" : `<p><b>${failWhy.code}</b>: ${failWhy.text}. The request stops here, and no token is issued.</p>
+        <div class="note">A different namespace or service account is a different SPIFFE ID, so Entra rejects it even though
+        it came from the same SPIRE server and has a valid signature.</div>`}` };
+  if (!ok.match) return [lookup];
+  return [
+    lookup,
+    { from: "entra", to: "issuer", label: "GET /.well-known/openid-configuration",
+      title: "Entra fetches the SPIRE discovery document",
+      where: `Entra ID → ${LAB.issuer} (internet → your reverse proxy → Envoy Gateway → OIDC discovery provider)`,
+      body: `<p>Entra needs the public keys to check the signature. It starts from the issuer URL in the credential:</p>
+        <pre>GET ${LAB.issuer}/.well-known/openid-configuration
+
+{ "issuer":   "${LAB.issuer}",
+  "jwks_uri": "${LAB.issuer}/keys", … }</pre>
+        <p>That's why the issuer had to be public with a trusted certificate, and why the proxy only allows these two paths.
+        Entra caches the result, so this doesn't happen on every exchange.</p>` },
+    { from: "entra", to: "issuer", label: "GET /keys",
+      title: "Entra fetches SPIRE's public signing keys",
+      where: `Entra ID → ${LAB.issuer}/keys`,
+      body: `<pre>{ "keys": [
+  { "kty": "RSA", "alg": "RS256", "use": "sig", "kid": "pzQ9hIkM…", "n": "…", "e": "AQAB" },   # active
+  { "kty": "RSA", "alg": "RS256", "use": "sig", "kid": "yrcP51Sg…", … }                     # next, pre-published
+] }</pre>
+        <p>The SPIRE OIDC discovery provider builds this from the trust bundle, which holds public keys only. The private keys
+        never leave the SPIRE server.</p>` },
+    { self: "entra", label: "Verify signature (kid), exp, nbf → issue token",
+      title: "Entra verifies the SVID and issues an access token",
+      where: "Entra ID",
+      body: `<ul class="checks">
+          <li class="ok">signature verifies with the key whose <code>kid</code> matches the SVID header</li>
+          <li class="ok">not expired (<code>exp</code>), already valid (<code>nbf</code>/<code>iat</code>)</li>
+          <li class="ok">issuer, subject and audience match the federated credential</li>
+        </ul>
+        <p>From here on, SPIRE is out of the picture. Entra issues its <b>own</b> token, signed by Entra, for the managed
+        identity and the requested resource.</p>` },
+  ];
+}
+
+// ---- scenarios -----------------------------------------------------------------
+
+const SCENARIOS = {
+  storage: {
+    tab: "Read a blob (Azure Storage)", target: { name: "Azure Storage", sub: "spirefic…/fic-test" },
+    steps: () => [
+      ...svidSteps(),
+      exchangeStep("storage", "https://storage.azure.com/.default"),
+      ...verifySteps({ match: true, iss: true, sub: true, aud: true }),
+      { from: "entra", to: "pod", label: "access_token (aud=storage, ~24 h)",
+        title: "The pod gets an Azure Storage access token",
+        where: "Entra ID → pod",
+        body: `<pre>{ "aud":   "https://storage.azure.com",
+  "iss":   "https://sts.windows.net/${LAB.tenant}/",
+  "appid": "${LAB.miClientId}",        # the managed identity
+  "oid":   "${LAB.miObjectId}",
+  "idtyp": "app",
+  "exp":   iat + ~24 h }</pre>
+          <div class="note">This token outlives the 15-minute SVID. Removing the pod's SPIRE registration stops new
+          exchanges, not this token. To cut access off immediately, remove the role assignment or the federated credential.</div>` },
+      { from: "pod", to: "target", label: "GET hello.txt (Bearer token)",
+        title: "The pod reads the blob",
+        where: `Pod → ${LAB.blobUrl}`,
+        body: `<p>Azure Storage validates Entra's token (not the SVID), then checks <b>Azure RBAC</b>: the managed identity has
+          <i>Storage Blob Data Reader</i> on this container.</p>
+          <pre>HTTP 200
+Hello from Azure Blob Storage, read with a SPIRE-issued SVID.</pre>` },
+      { from: "pod", to: "target", bad: true, label: "PUT written-by-svid.txt → 403",
+        title: "Writing is denied",
+        where: "Pod → Azure Storage",
+        body: `<pre>HTTP 403  AuthorizationPermissionMismatch</pre>
+          <p>Authentication worked (a valid token for the right identity), but <b>authorization</b> didn't: the role is read-only.
+          The federated credential only decides <i>who</i> the pod can be in Azure. Azure RBAC still decides what that identity may do.</p>` },
+    ],
+  },
+
+  kube: {
+    tab: "Call kube-apiserver", target: { name: "kube-apiserver", sub: "kubernetes.default.svc" },
+    steps: () => [
+      ...svidSteps(),
+      exchangeStep("homelab-kube-apiserver", `${LAB.kubeAppId}/.default`),
+      ...verifySteps({ match: true, iss: true, sub: true, aud: true }).map((s, i, a) =>
+        i === a.length - 1 ? { ...s, label: "Verify SVID + app role assigned? → issue token",
+          body: s.body + `<p>One extra check for this resource: <code>homelab-kube-apiserver</code> has
+            <i>assignment required</i> on, so Entra only issues a token because the managed identity was assigned the
+            <b>Cluster.Viewer</b> app role. Without it, this fails with <code>AADSTS501051</code>.</p>` } : s),
+      { from: "entra", to: "pod", label: "access_token (aud=kube app, roles=[Cluster.Viewer])",
+        title: "The pod gets a token for kube-apiserver",
+        where: "Entra ID → pod",
+        body: `<pre>{ "aud":   "${LAB.kubeAppId}",
+  "iss":   "https://login.microsoftonline.com/${LAB.tenant}/v2.0",
+  "tid":   "${LAB.tenant}",
+  "oid":   "${LAB.miObjectId}",
+  "roles": ["Cluster.Viewer"] }</pre>
+          <p>A v2 token, because the app requests v2, with the assigned app role in <code>roles</code>.</p>` },
+      { from: "pod", to: "target", label: "SelfSubjectReview (Bearer token) → who am I?",
+        title: "kube-apiserver authenticates the Entra token",
+        where: "Pod → https://kubernetes.default.svc (the pod has no service account token)",
+        body: `<p>kube-apiserver has <b>never heard of SPIRE</b>. It trusts Entra through its
+          <code>AuthenticationConfiguration</code>, and fetches <i>Entra's</i> keys (from login.microsoftonline.com) to verify:</p>
+          <ul class="checks">
+            <li class="ok">iss = Entra v2 issuer for the tenant</li>
+            <li class="ok">aud = homelab-kube-apiserver app</li>
+            <li class="ok">claims.tid == tenant</li>
+          </ul>
+          <pre>username: entra:${LAB.miObjectId}          # from oid
+groups:   [entra:role:Cluster.Viewer,        # from roles
+           system:authenticated]</pre>` },
+      { from: "pod", to: "target", label: "list pods → 200 (view)",
+        title: "RBAC allows reads",
+        where: "kube-apiserver RBAC",
+        body: `<pre>ClusterRoleBinding entra-cluster-viewers:
+  Group entra:role:Cluster.Viewer  →  ClusterRole view</pre>
+          <p><code>view</code> allows get/list/watch on most namespaced resources, so listing pods returns <b>200</b>.</p>` },
+      { from: "pod", to: "target", bad: true, label: "create configmap → 403",
+        title: "RBAC denies writes",
+        where: "kube-apiserver RBAC",
+        body: `<pre>configmaps is forbidden: User "entra:${LAB.miObjectId}" cannot create resource "configmaps"
+in API group "" in the namespace "${LAB.ns}"</pre>
+          <p>The whole chain: <b>SPIRE</b> vouches for the pod → <b>Entra</b> vouches for the managed identity →
+          <b>kube-apiserver</b> maps the role → <b>RBAC</b> decides. Each hop only trusts the one before it.</p>` },
+    ],
+  },
+
+  wrongsa: {
+    tab: "✗ Wrong service account", target: { name: "Azure Storage", sub: "never reached" },
+    steps: () => [
+      ...svidSteps({ sa: "other-client" }),
+      exchangeStep("storage", "https://storage.azure.com/.default"),
+      ...verifySteps({ match: false, iss: true, sub: false, aud: true },
+        { code: "AADSTS700213", text: `No matching federated identity record found for presented assertion subject '${spiffe(LAB.ns, "other-client")}'` }),
+      { from: "entra", to: "pod", bad: true, label: "400 AADSTS700213",
+        title: "The pod gets an error, not a token",
+        where: "Entra ID → pod",
+        body: `<p>The SVID was genuine and correctly signed by your SPIRE server. It just identifies a different workload,
+          and nothing in Entra trusts that one. The resource is never contacted.</p>` },
+    ],
+  },
+
+  wrongaud: {
+    tab: "✗ Wrong audience", target: { name: "Azure Storage", sub: "never reached" },
+    steps: () => [
+      ...svidSteps({ aud: "api://not-azure" }),
+      exchangeStep("storage", "https://storage.azure.com/.default"),
+      ...verifySteps({ match: false, iss: true, sub: true, aud: false },
+        { code: "AADSTS700212", text: "No matching federated identity record found for presented assertion audience 'api://not-azure'" }),
+      { from: "entra", to: "pod", bad: true, label: "400 AADSTS700212",
+        title: "Rejected on the audience",
+        where: "Entra ID → pod",
+        body: `<p>The audience says who a token is <i>for</i>. A JWT-SVID minted for some other service (<code>api://not-azure</code>)
+          can't be replayed against Entra, even from the right pod. That's why every JWT consumer should check <code>aud</code>.</p>` },
+    ],
+  },
+
+  kv: {
+    tab: "Read a Key Vault secret (SDK)", podSa: LAB.kvSa, target: { name: "Azure Key Vault", sub: "spirekv…" },
+    steps: () => [
+      ...svidSteps({ sa: LAB.kvSa }),
+      { self: "pod", label: "Azure SDK: DefaultAzureCredential → WorkloadIdentityCredential",
+        title: "The app just uses the Azure SDK, with no SPIRE code",
+        where: "Inside the pod: the application",
+        body: `<p>The application code is plain Azure SDK:</p>
+          <pre>from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+
+client = SecretClient(vault_url=VAULT_URI, credential=DefaultAzureCredential())
+client.get_secret("${LAB.kvAllowed}").value</pre>
+          <p><code>DefaultAzureCredential</code> tries a chain of credential types. With these three environment variables set,
+          its <b>WorkloadIdentityCredential</b> takes over:</p>
+          <pre>AZURE_TENANT_ID=${LAB.tenant}
+AZURE_CLIENT_ID=${LAB.kvClientId}       # the kv-reader managed identity
+AZURE_FEDERATED_TOKEN_FILE=/svid/jwt.token     # written and refreshed by spiffe-helper</pre>
+          <p>That's the same mechanism AKS workload identity uses. There the file holds a Kubernetes service account token;
+          here it holds a SPIRE JWT-SVID. The SDK neither knows nor cares, and it re-reads the file whenever it needs a new token,
+          so <code>spiffe-helper</code> rotating it is enough.</p>` },
+      exchangeStep("Key Vault", "https://vault.azure.net/.default", LAB.kvClientId,
+        `<div class="note">This request is made by the SDK, not by your code. It's the same swap as the blob and kube-apiserver
+          tabs, just with Key Vault's scope.</div>`),
+      ...verifySteps({ match: true, iss: true, sub: true, aud: true }, null, LAB.kvSa),
+      { from: "entra", to: "pod", label: "access_token (aud=vault.azure.net)",
+        title: "The SDK gets a Key Vault token",
+        where: "Entra ID → pod (held by the SDK's credential, in memory)",
+        body: `<pre>{ "aud":   "https://vault.azure.net",
+  "appid": "${LAB.kvClientId}",     # the kv-reader managed identity
+  "idtyp": "app", … }</pre>
+          <p>The SDK caches it and reuses it until it's close to expiry. Your code never sees it.</p>` },
+      { from: "pod", to: "target", label: `GET /secrets/${LAB.kvAllowed} → 200`,
+        title: "Key Vault checks Azure RBAC on that one secret",
+        where: `Pod → ${LAB.vaultUri}/secrets/${LAB.kvAllowed}`,
+        body: `<p>The vault uses <b>Azure RBAC</b> for its data plane (no access policies). The managed identity has
+          <i>Key Vault Secrets User</i> scoped to <b>this secret</b>, not the vault:</p>
+          <pre>HTTP 200
+demo-db-password-read-with-a-spire-svid</pre>` },
+      { self: "pod", label: "Value in process memory (or tmpfs) - never a Kubernetes Secret",
+        title: "Where the secret ends up, and why that's safer than CSI",
+        where: "Inside the pod",
+        body: `<p>The value is in the application's memory. In the <code>kv-shell</code> demo a sidecar writes it to an
+          <b>in-memory</b> volume, <code>/secrets/${LAB.kvAllowed}</code>, so you can <code>cat</code> it.</p>
+          <ul class="checks">
+            <li class="ok">never a Kubernetes Secret, so never in etcd</li>
+            <li class="ok">no privileged DaemonSet or controller fetching secrets for other pods</li>
+            <li class="ok">the identity can read exactly one secret</li>
+            <li class="ok">no need to make the cluster's own service-account issuer public</li>
+          </ul>
+          <div class="note">The Secrets Store CSI driver and External Secrets Operator authenticate with Kubernetes service
+          account tokens, and either fetch secrets with a node-wide component or sync them into etcd.</div>` },
+    ],
+  },
+
+  kvdenied: {
+    tab: "✗ Secret not granted", podSa: LAB.kvSa, target: { name: "Azure Key Vault", sub: "spirekv…" },
+    steps: () => [
+      ...svidSteps({ sa: LAB.kvSa }),
+      exchangeStep("Key Vault", "https://vault.azure.net/.default", LAB.kvClientId),
+      ...verifySteps({ match: true, iss: true, sub: true, aud: true }, null, LAB.kvSa),
+      { from: "entra", to: "pod", label: "access_token (aud=vault.azure.net)",
+        title: "The identity is genuine, so Entra issues a token",
+        where: "Entra ID → pod",
+        body: `<p>Nothing is wrong with <i>who</i> the pod is. It's the right SPIFFE ID, and the swap succeeds.</p>` },
+      { from: "pod", to: "target", bad: true, label: `GET /secrets/${LAB.kvDenied} → 403 ForbiddenByRbac`,
+        title: "Authorization stops it: the role covers one secret only",
+        where: `Pod → ${LAB.vaultUri}/secrets/${LAB.kvDenied}`,
+        body: `<pre>HTTP 403
+{"error":{"code":"Forbidden", … "innererror":{"code":"ForbiddenByRbac"}}}</pre>
+          <p>Same vault, same valid token, different secret. <i>Key Vault Secrets User</i> is scoped to
+          <code>${LAB.kvAllowed}</code> only. Access policies can't express that, because they're vault-wide; per-secret RBAC
+          can. A compromised workload gets one secret, not the vault.</p>` },
+    ],
+  },
+};
+
+// ---- rendering -----------------------------------------------------------------
+
+const W = 1000, TOP = 16, BOX_H = 46, ROW = 38, LEFT = 30;
+const colX = i => LEFT + 60 + i * ((W - 2 * LEFT - 120) / (ACTORS.length - 1));
+const idx = id => ACTORS.findIndex(a => a.id === id);
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+let scenarioKey = "storage", steps = [], cur = 0, timer = null;
+
+function render() {
+  const sc = SCENARIOS[scenarioKey];
+  const actors = ACTORS.map(a =>
+    a.id === "target" ? { ...a, name: sc.target.name, sub: sc.target.sub } :
+    a.id === "pod" && sc.podSa ? { ...a, sub: `${LAB.ns}/${sc.podSa}` } : a);
+  const H = TOP + BOX_H + 24 + steps.length * ROW + 16;
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Sequence diagram">
+    <defs>
+      ${["line", "muted", "active", "bad"].map(k => `<marker id="arr-${k}" viewBox="0 0 10 10" refX="9" refY="5"
+        markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"
+        fill="var(--${k === "line" ? "line" : k === "muted" ? "muted" : k === "active" ? "active" : "bad"})"/></marker>`).join("")}
+    </defs>`;
+  actors.forEach((a, i) => {
+    const x = colX(i);
+    s += `<line class="lifeline" x1="${x}" y1="${TOP + BOX_H}" x2="${x}" y2="${H - 8}"/>
+      <rect class="actor-box" x="${x - 72}" y="${TOP}" width="144" height="${BOX_H}" rx="8" style="stroke:var(${a.color})"/>
+      <text class="actor-name" x="${x}" y="${TOP + 20}" text-anchor="middle" style="fill:var(${a.color})">${esc(a.name)}</text>
+      <text class="actor-sub" x="${x}" y="${TOP + 36}" text-anchor="middle">${esc(a.sub)}</text>`;
+  });
+  steps.forEach((st, i) => {
+    const y = TOP + BOX_H + 30 + i * ROW;
+    const state = i < cur ? "done" : i === cur ? "current" : "";
+    const bad = st.bad ? " bad" : "";
+    const marker = i === cur ? (st.bad ? "bad" : "active") : i < cur ? "muted" : "line";
+    s += `<text class="step-num" x="6" y="${y + 4}">${i + 1}</text>`;
+    if (st.self) {
+      const x = colX(idx(st.self));
+      const w = Math.min(330, st.label.length * 6.4 + 20);
+      const bx = Math.min(Math.max(x - w / 2, 20), W - w - 10);
+      s += `<rect class="note-box ${state}${bad}" x="${bx}" y="${y - 13}" width="${w}" height="24" rx="5"/>
+        <text class="msg-label ${state}${bad}" x="${bx + w / 2}" y="${y + 3}" text-anchor="middle">${esc(st.label)}</text>`;
+    } else {
+      const x1 = colX(idx(st.from)), x2 = colX(idx(st.to));
+      const dir = x2 > x1 ? 1 : -1;
+      s += `<line class="msg ${state}${bad}" x1="${x1 + dir * 4}" y1="${y}" x2="${x2 - dir * 4}" y2="${y}"
+          marker-end="url(#arr-${marker})"/>`;
+      if (st.via) {
+        const xv = colX(idx(st.via));
+        s += `<circle cx="${xv}" cy="${y}" r="3" fill="var(--${i <= cur ? "muted" : "line"})"/>`;
+      }
+      const mid = (x1 + x2) / 2;
+      s += `<text class="msg-label ${state}${bad}" x="${mid}" y="${y - 6}" text-anchor="middle">${esc(st.label)}</text>`;
+    }
+  });
+  s += `</svg>`;
+  document.getElementById("diagram").innerHTML = s;
+
+  const st = steps[cur];
+  document.getElementById("detail").innerHTML =
+    `<h2>${cur + 1}. ${st.title}</h2><div class="where">${esc(st.where)}</div>${st.body}`;
+  document.getElementById("count").textContent = `step ${cur + 1} / ${steps.length}`;
+  document.getElementById("prev").disabled = cur === 0;
+  document.getElementById("first").disabled = cur === 0;
+  document.getElementById("next").disabled = cur === steps.length - 1;
+}
+
+function selectScenario(key) {
+  scenarioKey = key; steps = SCENARIOS[key].steps(); cur = 0; stop();
+  document.querySelectorAll(".tab").forEach(t => t.setAttribute("aria-selected", t.dataset.key === key));
+  render();
+}
+function go(n) { cur = Math.max(0, Math.min(steps.length - 1, n)); render(); }
+function stop() { clearInterval(timer); timer = null; document.getElementById("play").textContent = "▶ Play"; }
+function play() {
+  if (timer) return stop();
+  if (cur === steps.length - 1) go(0);
+  document.getElementById("play").textContent = "⏸ Pause";
+  timer = setInterval(() => { if (cur >= steps.length - 1) return stop(); go(cur + 1); }, 3200);
+}
+
+const tabs = document.getElementById("tabs");
+Object.entries(SCENARIOS).forEach(([key, sc]) => {
+  const b = document.createElement("button");
+  b.className = "tab"; b.role = "tab"; b.dataset.key = key; b.textContent = sc.tab;
+  b.onclick = () => selectScenario(key);
+  tabs.appendChild(b);
+});
+document.getElementById("t-iss").textContent = LAB.issuer;
+document.getElementById("t-sub").textContent = spiffe(LAB.ns, LAB.sa);
+document.getElementById("first").onclick = () => { stop(); go(0); };
+document.getElementById("prev").onclick = () => { stop(); go(cur - 1); };
+document.getElementById("next").onclick = () => { stop(); go(cur + 1); };
+document.getElementById("play").onclick = play;
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { stop(); go(cur + 1); }
+  if (e.key === "ArrowLeft") { stop(); go(cur - 1); }
+});
+selectScenario("storage");
+</script>
+</body>
+</html>
