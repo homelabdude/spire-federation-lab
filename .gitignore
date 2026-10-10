@@ -2,6 +2,7 @@
 lab.env
 out/
 cluster/values.local.yaml
+vm/ansible/inventory.ini
 cluster/chart/charts/
 
 # Rendered from terraform output (tenant and client IDs): write these to out/
@@ -16,3 +17,4 @@ tfplan
 tfplan.*
 *.tfplan
 !*.tfvars.example
+ROTATION_AND_VAULT.md

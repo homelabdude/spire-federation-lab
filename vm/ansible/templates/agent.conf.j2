@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+agent {
+  data_dir            = "/var/lib/spire/agent"
+  log_level           = "INFO"
+  server_address      = "{{ spire_server_address }}"
+  server_port         = "{{ spire_server_port }}"
+  socket_path         = "/run/spire/sockets/agent.sock"
+  trust_domain        = "{{ spire_trust_domain }}"
+  trust_bundle_path   = "/etc/spire/agent/bundle.json"
+  trust_bundle_format = "spiffe"
+}
+
+plugins {
+  NodeAttestor "x509pop" {
+    plugin_data {
+      private_key_path = "/etc/spire/agent/node.key"
+      certificate_path = "/etc/spire/agent/node.pem"
+    }
+  }
+
+  KeyManager "disk" {
+    plugin_data {
+      directory = "/var/lib/spire/agent"
+    }
+  }
+
+  WorkloadAttestor "unix" {
+    plugin_data {}
+  }
+
+  WorkloadAttestor "systemd" {
+    plugin_data {}
+  }
+}

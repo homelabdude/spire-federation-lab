@@ -96,6 +96,23 @@ output "spire_kv_secret_names" {
   } : null
 }
 
+# --- Tornjak UI sign-in (null unless enable_tornjak_oidc) ---
+
+# Values for tornjakRoute.oidc in cluster/values.local.yaml.
+output "tornjak_oidc" {
+  value = var.enable_tornjak_oidc ? {
+    tenantID = var.tenant_id
+    clientID = azuread_application.tornjak[0].client_id
+    issuer   = local.tornjak_issuer
+  } : null
+}
+
+# Read by `make tornjak-oidc-secret`, which puts it in the Secret the SecurityPolicy uses.
+output "tornjak_client_secret" {
+  value     = var.enable_tornjak_oidc ? azuread_application_password.tornjak[0].value : null
+  sensitive = true
+}
+
 output "kubectl_set_credentials" {
   value = <<-EOT
     kubectl config set-credentials entra \

@@ -8,6 +8,10 @@ tenant_id = "00000000-0000-0000-0000-000000000000"
 # spire_issuer_url               = "https://spire-k8s.example.com"   # exactly the SVID iss, no trailing slash
 # spire_workload_spiffe_id       = "spiffe://k8s.spire-lab.internal/ns/spire-demo/sa/azure-client"
 
+# --- Tornjak UI sign-in through Envoy Gateway (independent of the SPIRE flags) ---
+# enable_tornjak_oidc = true
+# tornjak_host        = "tornjak.k8s.example.com"
+
 # --- SPIRE -> Entra ID -> Key Vault (needs enable_spire_workload_identity) ---
 # enable_spire_keyvault = true
 # spire_kv_spiffe_id    = "spiffe://k8s.spire-lab.internal/ns/spire-demo/sa/kv-reader"

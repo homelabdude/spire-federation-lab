@@ -30,6 +30,13 @@ jobs:
           version: v3.19.0
       - run: make ci-helm
 
+  ansible:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: pipx install ansible-core
+      - run: make ci-ansible
+
   shell:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=SPIRE Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Root for now: the unix workload attestor inspects other processes.
+ExecStart=/usr/local/bin/spire-agent run -config /etc/spire/agent/agent.conf
+RuntimeDirectory=spire/sockets
+RuntimeDirectoryPreserve=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

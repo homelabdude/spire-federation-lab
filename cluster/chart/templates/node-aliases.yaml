@@ -1,0 +1,20 @@
+{{- if and (index .Values.spire "spire-server").nodeAttestor.x509POP.enabled (not .Values.gateway.renderListener) }}
+{{- $td := .Values.global.spire.trustDomain }}
+{{- range .Values.nodeAliases }}
+---
+# parentID is the server itself, which makes this a node alias: every agent attested
+# with a node cert whose CN is {{ . }} also gets this ID, whatever the cert's fingerprint.
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterStaticEntry
+metadata:
+  name: node-{{ . }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+spec:
+  className: {{ (index $.Values.spire "spire-server").controllerManager.className }}
+  parentID: {{ printf "spiffe://%s/spire/server" $td }}
+  spiffeID: {{ printf "spiffe://%s/node/%s" $td . }}
+  selectors:
+    - {{ printf "x509pop:subject:cn:%s" . }}
+{{- end }}
+{{- end }}

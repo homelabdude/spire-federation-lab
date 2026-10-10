@@ -1,0 +1,27 @@
+{{- if and .Values.serverEndpoint.enabled (not .Values.gateway.renderListener) }}
+# Exposes only the server API (:8081) on a pinned MetalLB IP so spire-agents outside
+# the cluster can attest and fetch SVIDs. A separate Service rather than the chart's
+# spire-server Service, which also carries :8443 when federation is on.
+apiVersion: v1
+kind: Service
+metadata:
+  name: spire-server-agent-endpoint
+  namespace: {{ .Values.global.spire.namespaces.server.name | default "spire-server" }}
+  annotations:
+    metallb.io/loadBalancerIPs: {{ .Values.serverEndpoint.loadBalancerIP | quote }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+    {{- toYaml .Values.serverEndpoint.allowedSourceRanges | nindent 4 }}
+  selector:
+    app.kubernetes.io/name: server
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: grpc
+      port: 8081
+      targetPort: grpc
+      protocol: TCP
+{{- end }}
