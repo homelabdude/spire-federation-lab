@@ -1,0 +1,195 @@
+# spire-agent on the VMs in [spire_agents], attested to the in-cluster SPIRE server with
+# x509pop. Run with `make vm-agent`.
+#
+# The node key is generated on the VM and never leaves it. Only the CSR comes to this
+# machine, where it's signed with the enrollment CA (out/x509pop-ca.key), and the
+# certificate goes back. The CN is the inventory hostname, which must be listed in the
+# chart's nodeAliases.
+
+- name: SPIRE agent with x509pop
+  hosts: spire_agents
+  become: true
+
+  vars:
+    spire_version: "1.15.3"   # same as the server (cluster/chart/Chart.lock -> spire chart appVersion)
+    spire_server_port: 8081
+    spire_node_cn: "{{ inventory_hostname }}"
+    spire_node_cert_days: 90
+    # Re-sign when the node certificate expires within this
+    spire_node_cert_renew_before: "+30d"
+    repo_out: "{{ playbook_dir }}/../../out"
+    spire_release: "spire-{{ spire_version }}-linux-amd64-musl"
+    spire_release_url: "https://github.com/spiffe/spire/releases/download/v{{ spire_version }}"
+
+  handlers:
+    - name: Restart spire-agent
+      ansible.builtin.systemd_service:
+        name: spire-agent
+        state: restarted
+        daemon_reload: true
+
+  tasks:
+    - name: Enrollment CA and cluster bundle exist locally
+      ansible.builtin.assert:
+        that:
+          - (repo_out ~ '/x509pop-ca.pem') is file
+          - (repo_out ~ '/x509pop-ca.key') is file
+          - (repo_out ~ '/cluster.bundle.json') is file
+        fail_msg: "Run `make x509pop-ca` and `make cluster-bundle` first (or use `make vm-agent`)."
+      run_once: true
+
+    - name: Directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/spire/agent, mode: "0755" }
+        - { path: /var/lib/spire/agent, mode: "0700" }
+        - { path: /opt/spire, mode: "0755" }
+
+    # --- Node key and certificate ---------------------------------------------------
+    # Key and CSR use the openssl CLI on the VM: community.crypto's key module can't find
+    # the curve classes in Ubuntu 26.04's python3-cryptography (46.x), although they work.
+    # Python crypto only runs on this machine (expiry check, signing).
+
+    - name: Node key (generated here, never copied off the VM)
+      ansible.builtin.shell: >-
+        umask 077 &&
+        openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /etc/spire/agent/node.key
+      args:
+        creates: /etc/spire/agent/node.key
+
+    - name: Existing node certificate
+      ansible.builtin.slurp:
+        src: /etc/spire/agent/node.pem
+      register: node_cert_existing
+      failed_when: false
+
+    - name: Existing node certificate expiry
+      community.crypto.x509_certificate_info:
+        content: "{{ node_cert_existing.content | b64decode }}"
+        valid_at:
+          renew: "{{ spire_node_cert_renew_before }}"
+      register: node_cert_info
+      when: node_cert_existing.content is defined
+      delegate_to: localhost
+      become: false
+
+    # The extensions in the CSR are copied into the certificate by the ownca signer.
+    - name: CSR
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -new
+          - -key
+          - /etc/spire/agent/node.key
+          - -subj
+          - "/CN={{ spire_node_cn }}"
+          - -addext
+          - basicConstraints=critical,CA:FALSE
+          - -addext
+          - keyUsage=critical,digitalSignature
+          - -addext
+          - extendedKeyUsage=clientAuth
+      register: node_csr_cmd
+      changed_when: false
+
+    # Unchanged if the existing certificate still matches the CSR and CA, unless it
+    # expires within spire_node_cert_renew_before.
+    - name: Sign the CSR with the enrollment CA (on this machine)
+      community.crypto.x509_certificate_pipe:
+        csr_content: "{{ node_csr_cmd.stdout }}"
+        content: "{{ (node_cert_existing.content | b64decode) if node_cert_existing.content is defined else omit }}"
+        provider: ownca
+        ownca_path: "{{ repo_out }}/x509pop-ca.pem"
+        ownca_privatekey_path: "{{ repo_out }}/x509pop-ca.key"
+        ownca_not_after: "+{{ spire_node_cert_days }}d"
+        force: "{{ node_cert_info.valid_at.renew is defined and not node_cert_info.valid_at.renew }}"
+      delegate_to: localhost
+      become: false
+      register: node_cert
+
+    - name: Node certificate
+      ansible.builtin.copy:
+        content: "{{ node_cert.certificate }}"
+        dest: /etc/spire/agent/node.pem
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart spire-agent
+
+    # --- Agent ------------------------------------------------------------------------
+
+    - name: SPIRE release (checked against the published sha256)
+      ansible.builtin.get_url:
+        url: "{{ spire_release_url }}/{{ spire_release }}.tar.gz"
+        checksum: "sha256:{{ spire_release_url }}/{{ spire_release }}_sha256sum.txt"
+        dest: "/opt/spire/{{ spire_release }}.tar.gz"
+        mode: "0644"
+
+    - name: Unpack the release
+      ansible.builtin.unarchive:
+        src: "/opt/spire/{{ spire_release }}.tar.gz"
+        dest: /opt/spire
+        remote_src: true
+        creates: "/opt/spire/spire-{{ spire_version }}/bin/spire-agent"
+
+    - name: spire-agent binary
+      ansible.builtin.copy:
+        src: "/opt/spire/spire-{{ spire_version }}/bin/spire-agent"
+        dest: /usr/local/bin/spire-agent
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart spire-agent
+
+    # Only read on first attestation. After that the agent keeps the bundle current itself
+    # in data_dir, so a changed file here doesn't restart it.
+    - name: Bootstrap trust bundle
+      ansible.builtin.copy:
+        src: "{{ repo_out }}/cluster.bundle.json"
+        dest: /etc/spire/agent/bundle.json
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Agent config
+      ansible.builtin.template:
+        src: agent.conf.j2
+        dest: /etc/spire/agent/agent.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart spire-agent
+
+    - name: systemd unit
+      ansible.builtin.template:
+        src: spire-agent.service.j2
+        dest: /etc/systemd/system/spire-agent.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart spire-agent
+
+    - name: spire-agent running
+      ansible.builtin.systemd_service:
+        name: spire-agent
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Apply pending restarts
+      ansible.builtin.meta: flush_handlers
+
+    - name: Agent healthy (attested and serving the Workload API)
+      ansible.builtin.command: spire-agent healthcheck -socketPath /run/spire/sockets/agent.sock
+      register: health
+      until: health.rc == 0
+      retries: 10
+      delay: 3
+      changed_when: false

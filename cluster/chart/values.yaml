@@ -51,6 +51,21 @@ spire:
       # ClusterSPIFFEIDs / ClusterFederatedTrustDomains with any other class.
       className: spire-lab
 
+    # x509pop for agents outside the cluster (the VM): the agent proves it holds the key
+    # of a node cert issued by our enrollment CA. The Makefile passes that CA with
+    # --set-file from out/x509pop-ca.pem. k8s_psat stays on for the in-cluster agents.
+    nodeAttestor:
+      x509POP:
+        enabled: false
+        mode: externalPKI
+
+    # Tornjak backend, a sidecar in the server pod with full admin access to the
+    # server API and no authentication of its own. It stays ClusterIP and is
+    # reached with `make tornjak` (kubectl port-forward), so Kubernetes RBAC on
+    # spire-server decides who can use it.
+    tornjak:
+      enabled: true
+
   spire-agent:
     workloadAttestors:
       k8s:
@@ -84,6 +99,13 @@ spire:
           namespace: envoy-gateway-system
           sectionName: spire-oidc
 
+  tornjak-frontend:
+    enabled: true
+    # The UI is a browser app that calls the backend from the browser, so this is
+    # the backend as seen from your machine: http://localhost:10000 through
+    # `make tornjak`, or https://<tornjakRoute.host> with the route.
+    apiServerURL: http://localhost:10000
+
 # --- This chart ----------------------------------------------------------------
 
 gateway:
@@ -98,6 +120,42 @@ gateway:
 bundleEndpoint:
   # MetalLB IP for the SPIFFE bundle endpoint (https_spiffe, TCP 8443).
   loadBalancerIP: ""
+
+# Server API (TCP 8081) on the LAN, for spire-agents outside the cluster (the VM).
+# Agents verify the server by its SPIFFE ID against their bootstrap bundle, so the
+# IP needs no certificate.
+serverEndpoint:
+  enabled: false
+  loadBalancerIP: ""
+  # Required when enabled. Enforced by kube-proxy (or the CNI's replacement), not by
+  # MetalLB, so only these sources reach :8081 on the LB IP.
+  allowedSourceRanges: []
+
+# Node aliases for x509pop agents, by node cert CN. In externalPKI mode the upstream chart
+# doesn't render agentPathTemplate, so an x509pop agent's ID ends in its cert fingerprint
+# and changes on every renewal. Each alias gives the agent whose cert has that CN a stable
+# ID, spiffe://<trustDomain>/node/<cn>, to use as the parentID of its workload entries.
+# Only certs from the enrollment CA are accepted, so the CN can't be claimed by anyone else.
+nodeAliases: []
+#  - vm-1
+
+# Tornjak UI on the existing eg Gateway, behind an Entra ID login run by Envoy Gateway
+# (SecurityPolicy). One hostname: /api/ goes to the backend, the rest to the UI, so the
+# login cookie covers both. The Entra app comes from azure/terraform (enable_tornjak_oidc).
+tornjakRoute:
+  enabled: false
+  # Must be covered by the listener below, e.g. tornjak.k8s.<domain>
+  host: ""
+  # Existing listener on eg that accepts routes from all namespaces. The route only
+  # attaches to it, the Gateway itself isn't changed.
+  sectionName: http
+  oidc:
+    tenantID: ""
+    clientID: ""
+    # Created by `make tornjak-oidc-secret` (key client-secret), not by this chart
+    clientSecretName: tornjak-oidc
+    # App role required in the ID token's roles claim
+    requiredRole: Tornjak.Admin
 
 # Federation with trust domain B (the VM). Enable once its SPIRE server is running.
 federation:

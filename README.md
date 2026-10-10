@@ -9,11 +9,10 @@ spire-federation-lab/
 ├── lab.env.example                   # VM settings -> copy to lab.env (gitignored)
 ├── cluster/                          # trust domain A, in the existing kubeadm cluster
 │   ├── chart/                        #   spire-lab Helm chart: wraps spiffe/spire and adds
-│   │   └── templates/                #     bundle endpoint Service, federation CRs, Gateway listener
+│   │   └── templates/                #     bundle + agent endpoint Services, federation CRs, node aliases, Gateway listener
 │   └── values.local.example.yaml     #   environment values -> copy to values.local.yaml (gitignored)
-├── vm/                               # trust domain B (todo)
-│   ├── terraform/                    #   1 small VM from the same Ubuntu template
-│   └── ansible/                      #   spire-server + spire-agent as systemd services
+├── vm/
+│   └── ansible/                      # spire-agent on the VM, x509pop-attested to trust domain A (trust domain B: todo)
 ├── azure/terraform/                  # Entra ID sign-in for kubectl; managed identity + FIC trusting SPIRE (feature flag)
 ├── oidc-public/                      # public HTTPS for the OIDC issuer (todo)
 ├── docs/
@@ -66,12 +65,129 @@ What the configuration does, and why:
 | OIDC provider `tls.spire.enabled: false` + `gatewayAPI` | Serves plain HTTP behind an HTTPRoute on `eg`, and the reverse proxy terminates TLS |
 | `spire-oidc` listener on `eg` | The existing listener only accepts `*.k8s.<domain>`. This is a separate named listener that only accepts routes from `spire-server`. The chart's HTTPRoute attaches to it by `sectionName`. |
 | `config.jwksUri` pinned to `https://…/keys` | Behind a TLS-terminating proxy the provider would otherwise advertise an `http://` jwks_uri, which Entra rejects |
-| `spire-server-bundle-endpoint` LB Service | Puts only :8443 (https_spiffe) on the LAN. The server API stays ClusterIP. |
+| `spire-server-bundle-endpoint` LB Service | Puts only :8443 (https_spiffe) on the LAN |
+| `spire-server-agent-endpoint` LB Service (`serverEndpoint`) | Puts only the server API (:8081) on the LAN for agents outside the cluster, limited to `allowedSourceRanges`. Off unless `serverEndpoint.enabled`. |
+| Tornjak backend + UI, ClusterIP only | The backend has full admin access to the server and no auth of its own, so it's only reachable with `make tornjak` (port-forward), i.e. for whoever Kubernetes RBAC allows |
 | Agent kubelet verification `auto` | kubeadm kubelets have a verifiable self-signed serving cert, so there's no need for the chart's `skip` default |
 | `controllerManager.className: spire-lab` | The federation CRs must carry this class or the controller ignores them |
 
 Every pod gets `spiffe://<trustDomain>/ns/<ns>/sa/<sa>` from the upstream chart's fallback ClusterSPIFFEID, so no extra
 entries are needed for the Azure FIC test (that ID is the FIC `subject`, and `https://<oidcHost>` is the `issuer`).
+
+### x509pop node attestation
+
+Agents outside the cluster attest with `x509pop`. In-cluster agents keep using `k8s_psat`.
+
+The enrollment CA only signs node certificates. SVIDs are still signed by SPIRE's own CA.
+
+| Key | Where | Used for |
+|---|---|---|
+| Enrollment CA key | `out/x509pop-ca.key`, never leaves the Mac | Signing node certificates |
+| Node key | Generated on the VM, never leaves it | Signing the server's challenge during attestation |
+| Node certificate (`CN=vm-1`) | VM | Sent to the server |
+
+The VM sends a CSR, the CA signs it, and the certificate goes back to the VM. During attestation the server checks
+that the certificate chains to the enrollment CA, then has the agent sign a challenge with the node key. A copied
+certificate without its key fails.
+
+Setup:
+
+```sh
+make x509pop-ca   # out/x509pop-ca.key + .pem, once. Only the .pem goes to the server.
+```
+
+`cluster/values.local.yaml`:
+
+```yaml
+spire:
+  spire-server:
+    nodeAttestor:
+      x509POP:
+        enabled: true
+nodeAliases:
+  - vm-1
+serverEndpoint:            # server API (:8081) for the VM's agent
+  enabled: true
+  loadBalancerIP: 192.168.0.242
+  allowedSourceRanges:
+    - 192.168.0.220/32     # the VM
+```
+
+```sh
+make cluster-install
+```
+
+Check the endpoint:
+
+```sh
+kubectl get svc -n spire-server spire-server-agent-endpoint   # EXTERNAL-IP 192.168.0.242
+nc -zv 192.168.0.242 8081                                     # from the VM: succeeds
+nc -zv -w 3 192.168.0.242 8081                                # from anywhere else: times out
+```
+
+`allowedSourceRanges` is enforced by kube-proxy, not MetalLB.
+
+Install the agent:
+
+```sh
+cp vm/ansible/inventory.example.ini vm/ansible/inventory.ini   # host name = node cert CN, must be in nodeAliases
+make vm-agent          # refreshes out/cluster.bundle.json, signs the node cert, installs and starts spire-agent
+make vm-agent-status   # x509pop agents, node alias entries, CA expiry
+```
+
+Node aliases: in `externalPKI` mode the upstream chart ignores `agentPathTemplate`, so the agent ID is
+`spiffe://<td>/spire/agent/x509pop/<cert-fingerprint>` and changes on every certificate renewal. Each name in
+`nodeAliases` becomes a `ClusterStaticEntry` (parent: the server, selector: `x509pop:subject:cn:<name>`) that gives
+the agent the stable ID `spiffe://<td>/node/<name>`. VM workload entries use that as `parentID`. Only the enrollment
+CA may issue node certificates, since anyone it signs a `CN=vm-1` certificate for gets that ID.
+
+Renewal:
+
+- **Node certificates** last 90 days. `make vm-agent` re-signs any that expire within 30, so run it at least every
+  two months. An agent with an expired node cert can't attest again (after a restart with an expired SVID, or a
+  wiped `data_dir`).
+- **Enrollment CA** lasts 365 days. `make x509pop-ca-renew` re-issues the certificate from the same key and subject,
+  so existing node certs still chain to it. Then `make cluster-install`. The Makefile annotates the server pod with
+  the CA's hash, so a changed CA rolls the server (the upstream chart mounts it with `subPath`, which never updates).
+- **New CA key** (compromise, or the old key is lost): manual. Every node cert has to be re-signed, and until they are,
+  the server's `caBundle.bundle` needs both CA certificates. `make x509pop-ca` won't overwrite an existing key, so
+  move the old one out of `out/` first. If the old key is compromised, drop it from the bundle right away and accept
+  that VM agents can't re-attest until `make vm-agent` has run.
+
+### Tornjak
+
+Shows agents, registration entries (including the ones the controller manager creates) and the server's
+config, and can create or delete entries. Entries created here survive: the controller manager only
+manages entries with its own ID prefix.
+
+The backend has no authentication, and creating an entry means choosing which workload gets which SPIFFE ID,
+including the IDs Azure trusts. So it's reachable in one of two ways:
+
+**Port-forward** (default). The UI calls the backend on `localhost:10000`, so the target forwards both:
+
+```sh
+make tornjak   # http://localhost:3000, Ctrl-C to stop
+```
+
+**Route on `eg` behind an Entra ID login.** An HTTPRoute on the existing `http` listener sends `/api/` to the
+backend and everything else to the UI, on one hostname. An Envoy Gateway `SecurityPolicy` on the route runs the
+OIDC login, forwards the ID token to its JWT provider, and allows only tokens whose `roles` claim contains
+`Tornjak.Admin`. The Entra app also requires the role assignment at sign-in, so users without it don't get a
+token at all.
+
+1. In `azure/terraform/terraform.tfvars`: `enable_tornjak_oidc = true` and `tornjak_host = "tornjak.k8s.<domain>"`,
+   then `terraform apply`. The role is assigned to the same users as `Cluster.Admin`.
+2. In `cluster/values.local.yaml`: the `tornjakRoute` block with the IDs from `terraform output tornjak_oidc`, and
+   `spire.tornjak-frontend.apiServerURL: https://tornjak.k8s.<domain>`. The chart refuses to render if the two disagree.
+3. Install, then put the client secret in the cluster (piped from Terraform, never written to a file):
+   ```sh
+   make cluster-install
+   make tornjak-oidc-secret
+   ```
+
+The client secret rotates on the first `terraform apply` after 180 days. Run `make tornjak-oidc-secret` again
+after that apply. With the route on, `make tornjak` no longer works for the UI (it calls the route host), but
+port-forwarding the backend alone still does for API calls.
 
 ### Public OIDC issuer
 
@@ -82,6 +198,13 @@ on it. A wildcard certificate covers one label only: `*.example.com` covers `spi
 `spire.k8s.example.com`.
 
 `make cluster-status` fetches both documents. The keys should show `"kty": "RSA"`.
+
+### Key rotation
+
+SPIRE rotates its CA and JWT signing key itself (`caTTL: 24h`), publishing each new key about 8 hours before using it.
+[`cluster/ROTATION_AND_VAULT.md`](cluster/ROTATION_AND_VAULT.md) covers the automatic cycle, non-disruptive manual
+rotation with `spire-server localauthority`, what changes with an upstream CA, and design notes for reading secrets
+from HashiCorp Vault with SVIDs.
 
 ### Federating with trust domain B
 

@@ -71,6 +71,20 @@ variable "workload_identity_location" {
   default     = "uksouth"
 }
 
+# --- Tornjak UI sign-in (tornjak-app.tf) -----------------------------------------
+
+variable "enable_tornjak_oidc" {
+  description = "Create the Entra app that Envoy Gateway uses to sign users in to the Tornjak UI, with a Tornjak.Admin role assigned to the cluster admins."
+  type        = bool
+  default     = false
+}
+
+variable "tornjak_host" {
+  description = "Hostname of the Tornjak UI (tornjakRoute.host in the chart). The redirect URI is https://<this>/oauth2/callback."
+  type        = string
+  default     = ""
+}
+
 variable "cluster_admin_object_ids" {
   description = "Object IDs of users assigned the Cluster.Admin app role. Defaults to the user running Terraform."
   type        = list(string)

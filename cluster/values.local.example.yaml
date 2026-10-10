@@ -27,6 +27,37 @@ bundleEndpoint:
   # Inside the MetalLB pool and not already taken (.240 is the Envoy Gateway)
   loadBalancerIP: 192.168.0.241
 
+# Server API for the VM's spire-agent. Only the VM may connect.
+serverEndpoint:
+  enabled: true
+  loadBalancerIP: 192.168.0.242
+  allowedSourceRanges:
+    - 192.168.0.220/32
+
+# x509pop node attestation for agents outside the cluster. Run `make x509pop-ca` first;
+# the Makefile passes out/x509pop-ca.pem. Each CN gets the stable node alias
+# spiffe://<trustDomain>/node/<cn>.
+# spire:
+#   spire-server:
+#     nodeAttestor:
+#       x509POP:
+#         enabled: true
+# nodeAliases:
+#   - vm-1
+
+# Tornjak UI behind an Entra ID login on eg. Needs enable_tornjak_oidc in azure/terraform
+# (IDs from `terraform output tornjak_oidc`) and `make tornjak-oidc-secret`.
+tornjakRoute:
+  enabled: false
+  host: tornjak.k8s.example.com
+  oidc:
+    tenantID: 00000000-0000-0000-0000-000000000000
+    clientID: 00000000-0000-0000-0000-000000000000
+# With the route enabled, the UI calls the backend through it:
+# spire:
+#   tornjak-frontend:
+#     apiServerURL: https://tornjak.k8s.example.com
+
 # Trust domain B (the VM). Enable once its SPIRE server is running and its bundle
 # is in out/vm.bundle.json.
 federation:

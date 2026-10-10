@@ -110,6 +110,12 @@ What gets created (all Entra ID free tier):
 The role arrives in the token as `"roles": ["Cluster.Admin"]`. kube-apiserver maps it to the group `entra:role:Cluster.Admin`,
 which is what the RBAC binding targets. Nothing depends on Entra groups or the `groups` claim.
 
+With `enable_tornjak_oidc = true` (and `tornjak_host`), [`tornjak-app.tf`](tornjak-app.tf) adds a separate
+app registration, `<cluster_name>-tornjak`, for the Tornjak UI login that Envoy Gateway runs. It has a web
+redirect URI `https://<tornjak_host>/oauth2/callback`, a `Tornjak.Admin` app role assigned to the same users as
+`Cluster.Admin`, `app_role_assignment_required = true`, and a client secret that's replaced on the first apply
+after 180 days. Setup and the cluster side: [README](../../README.md#tornjak).
+
 ### Why an app role instead of Default Access
 
 With `app_role_assignment_required = true`, a user needs *some* assignment to get a token. The minimal option is Entra's

@@ -1,0 +1,86 @@
+{{- if and .Values.tornjakRoute.enabled (not .Values.gateway.renderListener) }}
+{{- $r := .Values.tornjakRoute }}
+{{- $ns := .Values.global.spire.namespaces.server.name | default "spire-server" }}
+{{- $issuer := printf "https://login.microsoftonline.com/%s/v2.0" $r.oidc.tenantID }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tornjak
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      sectionName: {{ $r.sectionName }}
+  hostnames:
+    - {{ $r.host | quote }}
+  rules:
+    # Every backend API path is under /api/v1/
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: {{ .Release.Name }}-tornjak-backend
+          port: 10000
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ .Release.Name }}-tornjak-frontend
+          port: 3000
+---
+# Envoy runs the Entra ID login, then forwards the decrypted ID token as a Bearer
+# header, where the JWT provider validates it and the authorization rule checks its
+# roles claim. Envoy's filter order runs OAuth2 before JWT, and the token cookies stay
+# encrypted.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: tornjak
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/part-of: spire-lab
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: tornjak
+  oidc:
+    provider:
+      issuer: {{ $issuer | quote }}
+    clientID: {{ $r.oidc.clientID | quote }}
+    clientSecret:
+      name: {{ $r.oidc.clientSecretName }}
+    # Set explicitly: Envoy sees plain HTTP behind the TLS-terminating proxy
+    redirectURL: {{ printf "https://%s/oauth2/callback" $r.host | quote }}
+    logoutPath: /logout
+    # offline_access gives Envoy a refresh token, so sessions outlive the 1h ID token
+    scopes: [openid, profile, offline_access]
+    forwardIDToken:
+      header: Authorization
+  jwt:
+    providers:
+      - name: entra
+        issuer: {{ $issuer | quote }}
+        audiences:
+          - {{ $r.oidc.clientID | quote }}
+        remoteJWKS:
+          uri: {{ printf "https://login.microsoftonline.com/%s/discovery/v2.0/keys" $r.oidc.tenantID | quote }}
+  authorization:
+    defaultAction: Deny
+    rules:
+      - name: tornjak-admins
+        action: Allow
+        principal:
+          jwt:
+            provider: entra
+            claims:
+              - name: roles
+                valueType: StringArray
+                values:
+                  - {{ $r.oidc.requiredRole | quote }}
+{{- end }}

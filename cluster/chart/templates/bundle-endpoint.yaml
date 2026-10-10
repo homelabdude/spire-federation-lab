@@ -1,7 +1,8 @@
 {{- include "spire-lab.validate" . }}
 {{- if not .Values.gateway.renderListener }}
 # Exposes only the SPIFFE bundle endpoint (https_spiffe) on a pinned MetalLB IP so
-# trust domain B can fetch this domain's bundle. The server API (:8081) stays ClusterIP.
+# trust domain B can fetch this domain's bundle. The server API (:8081) has its own
+# Service (server-endpoint.yaml), only when serverEndpoint.enabled.
 apiVersion: v1
 kind: Service
 metadata:
